@@ -1,5 +1,5 @@
 package com.alejandro.tvlauncher
- 
+
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
@@ -20,11 +20,11 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
- 
+
 class MainActivity : Activity() {
     private class Th(val name: String, val top: Int, val bottom: Int, val accent: Int)
     private class Opt(val label: String, val run: () -> Unit)
- 
+
     private val themes = listOf(
         Th("Ámbar", 0xFF2B1B10.toInt(), 0xFF0F0E17.toInt(), 0xFFFFB347.toInt()),
         Th("Océano", 0xFF0B2233.toInt(), 0xFF070C14.toInt(), 0xFF4DD0E1.toInt()),
@@ -37,7 +37,7 @@ class MainActivity : Activity() {
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     private lateinit var prefs: SharedPreferences
     private var sig = ""
- 
+
     private val theme get() = themes[prefs.getInt("theme", 0) % themes.size]
     private val scale get() = sizeScale[prefs.getInt("size", 1) % 3]
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -45,7 +45,7 @@ class MainActivity : Activity() {
     private fun getSet(k: String): Set<String> = prefs.getStringSet(k, emptySet())!!.toSet()
     private fun putSet(k: String, s: Set<String>) = prefs.edit().putStringSet(k, s).apply()
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
- 
+
     override fun onCreate(b: Bundle?) { super.onCreate(b); prefs = getSharedPreferences("p", 0) }
     override fun onResume() {
         super.onResume()
@@ -54,16 +54,16 @@ class MainActivity : Activity() {
     }
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() { /* el inicio no se cierra */ }
- 
+
     private fun go(i: Intent, quiet: Boolean = false): Boolean = try {
         startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
     } catch (e: Exception) { if (!quiet) toast("No se pudo abrir"); false }
- 
+
     private fun goPkg(p: String): Boolean {
         val i = packageManager.getLeanbackLaunchIntentForPackage(p) ?: packageManager.getLaunchIntentForPackage(p) ?: return false
         return go(i)
     }
- 
+
     private fun apps(): List<ResolveInfo> {
         val pm = packageManager
         return listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)
@@ -72,14 +72,14 @@ class MainActivity : Activity() {
             .filter { it.activityInfo.packageName != packageName }
             .sortedBy { it.loadLabel(pm).toString().lowercase() }
     }
- 
+
     // ---------- piezas de interfaz ----------
     private fun glass(focused: Boolean, radius: Int) = GradientDrawable().apply {
         cornerRadius = dp(radius).toFloat()
         setColor(if (focused) 0x33FFFFFF else 0x14FFFFFF)
         setStroke(dp(if (focused) 3 else 1), if (focused) theme.accent else 0x26FFFFFF)
     }
- 
+
     private fun focusable(v: View, radius: Int, grow: Float, onClick: () -> Unit, onLong: (() -> Unit)? = null): View {
         v.isFocusable = true; v.isClickable = true
         fun paint(f: Boolean) {
@@ -93,7 +93,7 @@ class MainActivity : Activity() {
         if (onLong != null) v.setOnLongClickListener { onLong(); true }
         return v
     }
- 
+
     private fun tile(label: String, icon: Drawable?, onClick: () -> Unit, onLong: () -> Unit): View {
         val s = scale
         val v = LinearLayout(this).apply {
@@ -108,7 +108,7 @@ class MainActivity : Activity() {
         })
         return focusable(v, 22, 1.08f, onClick, onLong)
     }
- 
+
     private fun chip(label: String, onClick: () -> Unit): View {
         val t = TextView(this).apply {
             text = label; textSize = 16f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
@@ -117,17 +117,17 @@ class MainActivity : Activity() {
         }
         return focusable(t, 30, 1.06f, onClick)
     }
- 
+
     private fun section(txt: String) = TextView(this).apply {
         text = txt.uppercase(); textSize = 13f; letterSpacing = 0.25f
         setTextColor(theme.accent); setPadding(dp(6), dp(26), 0, dp(6))
     }
- 
+
     private fun hrow(content: View) = HorizontalScrollView(this).apply {
         isHorizontalScrollBarEnabled = false; clipToPadding = false
         setPadding(dp(14), dp(14), dp(14), dp(14)); addView(content)
     }
- 
+
     // ---------- pantalla principal ----------
     private fun build() {
         val hidden = getSet("hidden"); val favs = getSet("fav")
@@ -136,14 +136,14 @@ class MainActivity : Activity() {
         val favApps = visible.filter { it.activityInfo.packageName in favs }
         val restApps = visible.filter { it.activityInfo.packageName !in favs }
         val tileW = dp((168 * scale).toInt()); val tileH = dp((124 * scale).toInt())
- 
+
         val root = FrameLayout(this).apply {
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(theme.top, theme.bottom))
         }
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(56), dp(28), dp(56), dp(12))
         }
- 
+
         // cabecera: hora + botones
         val head = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         val timeBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -162,7 +162,7 @@ class MainActivity : Activity() {
         }, gap())
         head.addView(chip("Personalizar") { customPanel() }, gap())
         col.addView(head)
- 
+
         // cuerpo con scroll
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         body.addView(section("Favoritas"))
@@ -184,22 +184,22 @@ class MainActivity : Activity() {
             })
         }
         body.addView(hrow(grid))
- 
+
         col.addView(ScrollView(this).apply {
             isVerticalScrollBarEnabled = false; clipToPadding = false; setPadding(0, 0, 0, dp(30)); addView(body)
         }, LinearLayout.LayoutParams(MATCH, 0, 1f))
- 
+
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
         setContentView(root)
         head.getChildAt(1)?.requestFocus()
     }
- 
+
     private fun appTile(ri: ResolveInfo): View {
         val pkg = ri.activityInfo.packageName
         val label = ri.loadLabel(packageManager).toString()
         return tile(label, ri.loadIcon(packageManager), { goPkg(pkg) }, { appMenu(pkg, label) })
     }
- 
+
     private fun appMenu(pkg: String, label: String) {
         val isFav = pkg in getSet("fav")
         val opts = arrayOf(if (isFav) "Quitar de favoritas" else "Fijar en favoritas", "Ocultar app", "Cancelar")
@@ -210,7 +210,7 @@ class MainActivity : Activity() {
             }
         }.show()
     }
- 
+
     // ---------- paneles ----------
     private fun panel(title: String, items: List<Opt>, note: String? = null) {
         val d = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
@@ -245,10 +245,10 @@ class MainActivity : Activity() {
         d.show()
         first?.requestFocus()
     }
- 
+
     private fun labelOf(i: TvInputInfo): String =
         i.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() } ?: i.loadLabel(this)?.toString() ?: "Entrada"
- 
+
     private fun inputPanel() {
         val inputs = try {
             (getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager).tvInputList.filter { it.isPassthroughInput }
@@ -266,7 +266,7 @@ class MainActivity : Activity() {
         }
         panel("Entrada", items, if (inputs.isEmpty()) "No se detectaron entradas HDMI/AV. Usa el botón de entrada del control." else null)
     }
- 
+
     private fun customPanel() {
         val items = listOf(
             Opt("Tema: ${theme.name}") { prefs.edit().putInt("theme", prefs.getInt("theme", 0) + 1).apply(); build(); customPanel() },
