@@ -1,5 +1,5 @@
 package com.alejandro.tvlauncher
- 
+
 import android.animation.ValueAnimator
 import android.app.*
 import android.bluetooth.BluetoothAdapter
@@ -30,12 +30,12 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
- 
+
 class MainActivity : Activity() {
     private class Skin(val name: String, val top: Int, val bottom: Int, val accent: Int)
     private class Opt(val label: String, val run: () -> Unit)
     private class Wall(val file: File, val title: String?, val pkg: String?, val prov: String?)
- 
+
     private val skins = listOf(
         Skin("Ámbar", 0xFF2B1B10.toInt(), 0xFF0F0E17.toInt(), 0xFFFFB347.toInt()),
         Skin("Océano", 0xFF0B2233.toInt(), 0xFF070C14.toInt(), 0xFF4DD0E1.toInt()),
@@ -50,7 +50,7 @@ class MainActivity : Activity() {
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     private val knownFavs = setOf("com.netflix.ninja", "com.google.android.youtube.tv", "com.amazon.amazonvideo.livingroom",
         "com.wbd.stream", "com.spotify.tv.android", "com.univision.prendetv")
- 
+
     private lateinit var prefs: SharedPreferences
     private val handler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
@@ -69,7 +69,7 @@ class MainActivity : Activity() {
     private var captionView: TextView? = null
     private var captionAction: () -> Unit = { }
     private var lastWx = 0L
- 
+
     private val skin get() = skins[prefs.getInt("theme", 0) % skins.size]
     private val scale get() = sizeScale[prefs.getInt("size", 1) % 3]
     private fun flag(k: String): Boolean = prefs.getBoolean(k, true)
@@ -79,7 +79,7 @@ class MainActivity : Activity() {
     private fun putSet(k: String, s: Set<String>) = prefs.edit().putStringSet(k, s).apply()
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
     private fun withAlpha(c: Int, a: Int): Int = (a shl 24) or (c and 0xFFFFFF)
- 
+
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         prefs = getSharedPreferences("p", 0)
@@ -87,9 +87,9 @@ class MainActivity : Activity() {
         getExternalFilesDir("fondos")
         tts = TextToSpeech(this) { st -> if (st == TextToSpeech.SUCCESS) tts?.language = Locale("es", "MX") }
     }
- 
+
     override fun onDestroy() { tts?.shutdown(); super.onDestroy() }
- 
+
     override fun onResume() {
         super.onResume()
         val s = apps().joinToString(",") { it.activityInfo.packageName }
@@ -98,15 +98,15 @@ class MainActivity : Activity() {
         scheduleWall()
         if (flag("wg_weather") && System.currentTimeMillis() - lastWx > 30 * 60_000L) fetchWeather()
     }
- 
+
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(tick); handler.removeCallbacks(wallTask)
     }
- 
+
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() { /* el inicio no se cierra */ }
- 
+
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(rc: Int, res: Int, data: Intent?) {
         super.onActivityResult(rc, res, data)
@@ -115,21 +115,21 @@ class MainActivity : Activity() {
             if (q != null) ask(q)
         }
     }
- 
+
     private val tick = object : Runnable { override fun run() { refreshStats(); handler.postDelayed(this, 2500) } }
     private val wallTask = object : Runnable { override fun run() { nextWall(); scheduleWall() } }
- 
+
     private fun go(i: Intent, quiet: Boolean = false): Boolean = try {
         startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
     } catch (e: Exception) { if (!quiet) toast("No se pudo abrir"); false }
- 
+
     private fun goPkg(p: String): Boolean {
         val i = packageManager.getLeanbackLaunchIntentForPackage(p) ?: packageManager.getLaunchIntentForPackage(p) ?: return false
         return go(i)
     }
- 
+
     private fun isInstalled(p: String): Boolean = try { packageManager.getPackageInfo(p, 0); true } catch (e: Exception) { false }
- 
+
     private fun apps(): List<ResolveInfo> {
         val pm = packageManager
         return listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)
@@ -138,18 +138,18 @@ class MainActivity : Activity() {
             .filter { it.activityInfo.packageName != packageName }
             .sortedBy { it.loadLabel(pm).toString().lowercase() }
     }
- 
+
     private fun httpGet(u: String): String {
         val c = URL(u).openConnection() as HttpURLConnection
         c.connectTimeout = 10000; c.readTimeout = 15000
         return c.inputStream.bufferedReader().use { it.readText() }
     }
- 
+
     // ---------- fondos ----------
     private fun userFiles(): List<File> =
         getExternalFilesDir("fondos")?.listFiles { f -> f.extension.lowercase() in setOf("jpg", "jpeg", "png", "webp") }
             ?.sortedBy { it.name } ?: emptyList()
- 
+
     private fun walls(): List<Wall> {
         if (prefs.getInt("wallmode", 0) == 1) {
             return try {
@@ -162,7 +162,7 @@ class MainActivity : Activity() {
         }
         return userFiles().map { Wall(it, null, null, null) }
     }
- 
+
     private fun decode(f: File): Bitmap? = try {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(f.path, o)
@@ -170,7 +170,7 @@ class MainActivity : Activity() {
         while (o.outWidth / (s * 2) >= 1920 && o.outHeight / (s * 2) >= 1080) s *= 2
         BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s })
     } catch (e: Throwable) { null }
- 
+
     private fun loadWall(w: Wall, animate: Boolean) {
         Thread {
             val b = decode(w.file)
@@ -178,7 +178,7 @@ class MainActivity : Activity() {
             runOnUiThread { if (b != null) { wallBmp = b; blurBmp = bl; curWall = w; applyWall(animate); updateCaption() } }
         }.start()
     }
- 
+
     private fun applyWall(animate: Boolean) {
         val layer = wallLayer ?: return
         val fit = prefs.getInt("fit", 0) == 1
@@ -193,7 +193,7 @@ class MainActivity : Activity() {
             put(); layer.animate().alpha(1f).setDuration(500).start()
         }.start()
     }
- 
+
     private fun updateCaption() {
         val c = captionView ?: return
         val w = curWall
@@ -204,20 +204,20 @@ class MainActivity : Activity() {
             captionAction = { if (p != null) goPkg(p) }
         } else c.visibility = View.GONE
     }
- 
+
     private fun nextWall() {
         val ws = walls(); if (ws.isEmpty()) return
         val idx = (prefs.getInt("wall", -1) + 1) % ws.size
         prefs.edit().putInt("wall", idx).apply()
         loadWall(ws[idx], true)
     }
- 
+
     private fun scheduleWall() {
         handler.removeCallbacks(wallTask)
         val s = autoSecs[prefs.getInt("auto", 0) % autoSecs.size]
         if (s > 0) handler.postDelayed(wallTask, s * 1000L)
     }
- 
+
     private fun refreshCartelera() {
         val keyFile = File(getExternalFilesDir(null), "tmdb.txt")
         if (!keyFile.exists()) { toast("Falta tmdb.txt con tu clave (ver guía)"); return }
@@ -251,14 +251,14 @@ class MainActivity : Activity() {
             } catch (e: Exception) { runOnUiThread { toast("Error de cartelera: revisa tu clave de TMDB") } }
         }.start()
     }
- 
+
     // ---------- clima ----------
     private fun wxDesc(c: Int): String = when (c) {
         0 -> "Despejado"; 1, 2 -> "Parcialmente nublado"; 3 -> "Nublado"; 45, 48 -> "Niebla"
         in 51..57 -> "Llovizna"; in 61..67, in 80..82 -> "Lluvia"; in 71..77, 85, 86 -> "Nieve"
         in 95..99 -> "Tormenta"; else -> ""
     }
- 
+
     private fun fetchWeather() {
         lastWx = System.currentTimeMillis()
         Thread {
@@ -270,7 +270,7 @@ class MainActivity : Activity() {
             } catch (e: Exception) { lastWx = 0L }
         }.start()
     }
- 
+
     // ---------- medidores ----------
     private inner class GaugeView(ctx: Context, val title: String) : View(ctx) {
         private var shown = 0f
@@ -283,7 +283,7 @@ class MainActivity : Activity() {
         private val num = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD }
         private val lab = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFD6D0E0.toInt(); textAlign = Paint.Align.CENTER }
         private val rect = RectF()
- 
+
         fun set(v: Float, t: String, w: Boolean = false) {
             text = t; warn = w
             ValueAnimator.ofFloat(shown, v.coerceIn(0f, 1f)).apply {
@@ -292,7 +292,7 @@ class MainActivity : Activity() {
                 start()
             }
         }
- 
+
         override fun onDraw(c: Canvas) {
             val w = width.toFloat(); val cx = w / 2; val cy = height / 2f
             val sw = w * 0.075f; val r = w / 2 - sw * 1.5f
@@ -315,10 +315,10 @@ class MainActivity : Activity() {
             c.drawText(text, cx, cy + r * 0.93f, num)
         }
     }
- 
+
     private fun gauge(title: String): GaugeView = GaugeView(this, title)
     private fun btOn(): Boolean = try { BluetoothAdapter.getDefaultAdapter()?.isEnabled == true } catch (e: Throwable) { false }
- 
+
     private fun pill(label: String, on: Boolean): View {
         val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         row.addView(View(this).apply {
@@ -328,7 +328,7 @@ class MainActivity : Activity() {
         row.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(12) }
         return row
     }
- 
+
     private fun fillStatus(row: LinearLayout) {
         row.removeAllViews()
         try {
@@ -339,7 +339,7 @@ class MainActivity : Activity() {
         } catch (e: Throwable) { }
         row.addView(pill("Bluetooth", btOn()))
     }
- 
+
     @Suppress("DEPRECATION")
     private fun refreshStats() {
         ramG?.let {
@@ -373,12 +373,12 @@ class MainActivity : Activity() {
         }
         statusRow?.let { fillStatus(it) }
     }
- 
+
     // ---------- piezas de interfaz ----------
     private fun dark(r: Int): GradientDrawable = GradientDrawable().apply {
         cornerRadius = dp(r).toFloat(); setColor(0xB0080810.toInt()); setStroke(dp(1), 0x22FFFFFF)
     }
- 
+
     // cursor: relleno del color del tema + borde grueso; los iconos "saltan" por dentro sin salirse del cuadro
     private fun glass(focused: Boolean, radius: Int): GradientDrawable {
         val cols = if (focused) intArrayOf(withAlpha(skin.accent, 0xB0), withAlpha(skin.accent, 0x50))
@@ -388,7 +388,7 @@ class MainActivity : Activity() {
             setStroke(dp(if (focused) 3 else 1), if (focused) skin.accent else 0x44FFFFFF)
         }
     }
- 
+
     private fun focusable(v: View, radius: Int, onClick: () -> Unit, onLong: (() -> Unit)? = null, pop: View? = null, popScale: Float = 1.18f): View {
         v.isFocusable = true; v.isClickable = true; v.clipToOutline = true
         fun paint(f: Boolean) {
@@ -401,7 +401,7 @@ class MainActivity : Activity() {
         if (onLong != null) v.setOnLongClickListener { onLong(); true }
         return v
     }
- 
+
     private fun tile(label: String, icon: Drawable?, onClick: () -> Unit, onLong: () -> Unit): View {
         val s = scale
         val v = LinearLayout(this).apply {
@@ -419,7 +419,7 @@ class MainActivity : Activity() {
         })
         return focusable(v, 22, onClick, onLong, iv, 1.15f)
     }
- 
+
     private fun wideTile(ri: ResolveInfo): View {
         val pm = packageManager; val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(pm).toString()
         val banner = try { ri.activityInfo.loadBanner(pm) ?: ri.activityInfo.applicationInfo.loadBanner(pm) } catch (e: Throwable) { null }
@@ -429,12 +429,12 @@ class MainActivity : Activity() {
         f.addView(img, FrameLayout.LayoutParams(MATCH, MATCH))
         return focusable(f, 22, { goPkg(pkg) }, { appMenu(pkg, label) }, img, 1.08f)
     }
- 
+
     private fun appTile(ri: ResolveInfo): View {
         val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(packageManager).toString()
         return tile(label, ri.loadIcon(packageManager), { goPkg(pkg) }, { appMenu(pkg, label) })
     }
- 
+
     private fun chip(label: String, onClick: () -> Unit): View {
         val t = TextView(this).apply {
             text = label; textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
@@ -443,7 +443,7 @@ class MainActivity : Activity() {
         }
         return focusable(t, 30, onClick)
     }
- 
+
     private fun shelf(title: String, content: View): View {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(12), dp(16), dp(8)); background = dark(26)
@@ -456,12 +456,12 @@ class MainActivity : Activity() {
         box.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(14) }
         return box
     }
- 
+
     private fun hrow(content: View): HorizontalScrollView = HorizontalScrollView(this).apply {
         isHorizontalScrollBarEnabled = false; clipToPadding = false
         setPadding(dp(4), dp(8), dp(4), dp(8)); addView(content)
     }
- 
+
     // ---------- pantalla principal ----------
     private fun build() {
         val hidden = getSet("hidden"); val favs = getSet("fav")
@@ -471,7 +471,7 @@ class MainActivity : Activity() {
         val s = scale
         val tileW = dp((168 * s).toInt()); val tileH = dp((124 * s).toInt())
         ramG = null; diskG = null; netG = null; statusRow = null; weatherView = null
- 
+
         val root = FrameLayout(this).apply {
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(skin.top, skin.bottom))
         }
@@ -486,9 +486,9 @@ class MainActivity : Activity() {
         }, FrameLayout.LayoutParams(MATCH, MATCH))
         if (wallBmp != null) applyWall(false)
         else { val ws = walls(); if (ws.isNotEmpty()) loadWall(ws[prefs.getInt("wall", 0).coerceIn(0, ws.size - 1)], false) }
- 
+
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(48), dp(22), dp(48), dp(8)) }
- 
+
         // cabecera
         val head = LinearLayout(this).apply { gravity = Gravity.TOP }
         val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(10), dp(20), dp(10)); background = dark(26) }
@@ -522,7 +522,7 @@ class MainActivity : Activity() {
             isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(0, dp(10), 0, dp(4)); addView(chips)
         })
         head.addView(left, LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dp(14) })
- 
+
         if (flag("wg_gauges") || flag("wg_status")) {
             val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(8)); background = dark(26) }
             if (flag("wg_gauges")) {
@@ -538,7 +538,7 @@ class MainActivity : Activity() {
             head.addView(card, LinearLayout.LayoutParams(WRAP, WRAP))
         }
         col.addView(head, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
- 
+
         // cuerpo: estantes con fondo propio
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         if (favApps.isEmpty()) {
@@ -558,11 +558,11 @@ class MainActivity : Activity() {
         body.addView(shelf("Todas las apps", hrow(grid)))
         body.alpha = 0f; body.translationY = dp(24).toFloat()
         body.animate().alpha(1f).translationY(0f).setDuration(450).start()
- 
+
         col.addView(ScrollView(this).apply {
             isVerticalScrollBarEnabled = false; clipToPadding = false; setPadding(0, 0, 0, dp(30)); addView(body)
         }, LinearLayout.LayoutParams(MATCH, 0, 1f))
- 
+
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
         setContentView(root)
         chips.getChildAt(0)?.requestFocus()
@@ -570,7 +570,7 @@ class MainActivity : Activity() {
         refreshStats()
         if (flag("wg_weather")) { lastWx = 0L; fetchWeather() }
     }
- 
+
     private fun appMenu(pkg: String, label: String) {
         val isFav = pkg in getSet("fav")
         val opts = arrayOf(if (isFav) "Quitar de favoritas" else "Fijar en favoritas", "Ocultar app", "Cancelar")
@@ -581,7 +581,7 @@ class MainActivity : Activity() {
             }
         }.show()
     }
- 
+
     // ---------- paneles ----------
     private fun panel(title: String, items: List<Opt>, note: String? = null) {
         val d = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
@@ -614,22 +614,22 @@ class MainActivity : Activity() {
         d.show()
         first?.requestFocus()
     }
- 
+
     private fun labelOf(i: TvInputInfo): String =
         i.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() } ?: i.loadLabel(this)?.toString() ?: "Entrada"
- 
+
     private fun passInputs(): List<TvInputInfo> = try {
         (getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager).tvInputList.filter { it.isPassthroughInput }.sortedBy { labelOf(it) }
     } catch (e: Exception) { emptyList() }
- 
+
     private fun openTv() {
         if (!go(Intent(Intent.ACTION_VIEW, TvContract.Channels.CONTENT_URI), true)) {
             if (!goPkg("com.mediatek.wwtv.tvcenter")) toast("No se pudo abrir la TV")
         }
     }
- 
+
     private fun openInput(i: TvInputInfo) { go(Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(i.id))) }
- 
+
     private fun inputPanel() {
         val inputs = passInputs()
         val items = mutableListOf<Opt>()
@@ -637,17 +637,17 @@ class MainActivity : Activity() {
         inputs.forEach { inp -> items.add(Opt(labelOf(inp)) { openInput(inp) }) }
         panel("Entrada", items, if (inputs.isEmpty()) "No se detectaron entradas HDMI/AV. Usa el botón de entrada del control." else null)
     }
- 
+
     // ---------- asistente (Claude) ----------
     private fun claudeKey(): String? =
         File(getExternalFilesDir(null), "claude.txt").takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
- 
+
     private fun assistantPanel(note: String? = null) {
         val items = listOf(Opt("Hablar") { listen() }, Opt("Escribir") { typeQuestion() }, Opt("Cerrar") { })
         panel("Asistente", items, note ?: if (claudeKey() == null) "Falta claude.txt con tu clave de API (ver guía)."
             else "Pídeme abrir una app, cambiar de entrada o pregúntame lo que quieras.")
     }
- 
+
     private fun listen() {
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -655,14 +655,14 @@ class MainActivity : Activity() {
             .putExtra(RecognizerIntent.EXTRA_PROMPT, "Habla ahora")
         try { startActivityForResult(i, 77) } catch (e: Exception) { toast("Sin reconocimiento de voz; usa Escribir") }
     }
- 
+
     private fun typeQuestion() {
         val et = EditText(this).apply { hint = "¿Qué quieres hacer?"; isSingleLine = true }
         AlertDialog.Builder(this).setTitle("Asistente").setView(et)
             .setPositiveButton("Enviar") { _, _ -> val q = et.text.toString().trim(); if (q.isNotEmpty()) ask(q) }
             .setNegativeButton("Cancelar", null).show()
     }
- 
+
     private fun ask(q: String) {
         val key = claudeKey()
         if (key == null) { assistantPanel(); return }
@@ -690,7 +690,7 @@ class MainActivity : Activity() {
             runOnUiThread { handleReply(reply) }
         }.start()
     }
- 
+
     private fun handleReply(raw: String) {
         var say = raw; var type = ""; var name = ""
         try {
@@ -719,13 +719,13 @@ class MainActivity : Activity() {
             "next_wall" -> nextWall()
         }
     }
- 
+
     // ---------- personalización ----------
     private fun onOff(b: Boolean): String = if (b) "Sí" else "No"
- 
+
     private fun toggle(key: String, label: String): Opt =
         Opt("$label: ${onOff(flag(key))}") { prefs.edit().putBoolean(key, !flag(key)).apply(); build(); widgetsPanel() }
- 
+
     private fun widgetsPanel() {
         panel("Widgets", listOf(
             toggle("wg_gauges", "Medidores (RAM, disco, red)"),
@@ -734,7 +734,7 @@ class MainActivity : Activity() {
             Opt("Volver") { customPanel() }
         ))
     }
- 
+
     private fun wallPanel() {
         val mode = prefs.getInt("wallmode", 0)
         val fit = prefs.getInt("fit", 0)
@@ -756,7 +756,7 @@ class MainActivity : Activity() {
             Opt("Volver") { customPanel() }
         ), "Mis imágenes: ${userFiles().size} en la carpeta. Cartelera: datos de TMDB (no certificado por TMDB).")
     }
- 
+
     private fun customPanel() {
         panel("Personalizar", listOf(
             Opt("Tema: ${skin.name}") { prefs.edit().putInt("theme", prefs.getInt("theme", 0) + 1).apply(); build(); customPanel() },
@@ -769,4 +769,3 @@ class MainActivity : Activity() {
         ))
     }
 }
- 
