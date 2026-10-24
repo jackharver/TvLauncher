@@ -1,5 +1,5 @@
 package com.alejandro.tvlauncher
-
+ 
 import android.animation.ValueAnimator
 import android.app.*
 import android.bluetooth.BluetoothAdapter
@@ -11,7 +11,9 @@ import android.content.pm.ResolveInfo
 import android.graphics.*
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
 import android.media.MediaMetadata
+import android.media.SoundPool
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
@@ -36,12 +38,12 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Calendar
 import java.util.Locale
-
+ 
 class MainActivity : Activity() {
     private class Skin(val name: String, val top: Int, val bottom: Int, val accent: Int)
     private class Opt(val label: String, val run: () -> Unit)
     private class Wall(val file: File, val title: String?, val pkg: String?, val prov: String?)
-
+ 
     private val skins = listOf(
         Skin("Ámbar", 0xFF2B1B10.toInt(), 0xFF0F0E17.toInt(), 0xFFFFB347.toInt()),
         Skin("Océano", 0xFF0B2233.toInt(), 0xFF070C14.toInt(), 0xFF4DD0E1.toInt()),
@@ -56,7 +58,7 @@ class MainActivity : Activity() {
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     private val knownFavs = setOf("com.netflix.ninja", "com.google.android.youtube.tv", "com.amazon.amazonvideo.livingroom",
         "com.wbd.stream", "com.spotify.tv.android", "com.univision.prendetv")
-
+ 
     private lateinit var prefs: SharedPreferences
     private val handler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
@@ -85,9 +87,16 @@ class MainActivity : Activity() {
     private var ctrl: MediaController? = null
     private val seasonNames = arrayOf("Automática", "Apagada", "Halloween", "Día de Muertos", "Navidad", "San Valentín")
     private val cardNames = arrayOf("Cristal", "Sólido", "Neón")
+    private val sndNames = arrayOf("Apagados", "Suave", "Tecno", "Retro")
+    private val volNames = arrayOf("Bajo", "Medio", "Alto")
+    private var sp: SoundPool? = null
+    private val sndIds = mutableListOf<Int>()
+    private var sfxReady = false
+    private var lastSfx = 0L
+    private var splashShown = false
     private var captionAction: () -> Unit = { }
     private var lastWx = 0L
-
+ 
     private val skin get() = skins[prefs.getInt("theme", 0) % skins.size]
     private val scale get() = sizeScale[prefs.getInt("size", 1) % 3]
     private fun flag(k: String): Boolean = prefs.getBoolean(k, true)
@@ -97,17 +106,18 @@ class MainActivity : Activity() {
     private fun putSet(k: String, s: Set<String>) = prefs.edit().putStringSet(k, s).apply()
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
     private fun withAlpha(c: Int, a: Int): Int = (a shl 24) or (c and 0xFFFFFF)
-
+ 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         prefs = getSharedPreferences("p", 0)
         if (!prefs.contains("fav")) putSet("fav", knownFavs)
         getExternalFilesDir("fondos")
+        loadSounds()
         tts = TextToSpeech(this) { st -> if (st == TextToSpeech.SUCCESS) tts?.language = Locale("es", "MX") }
     }
-
-    override fun onDestroy() { tts?.shutdown(); super.onDestroy() }
-
+ 
+    override fun onDestroy() { tts?.shutdown(); sp?.release(); super.onDestroy() }
+ 
     override fun onResume() {
         super.onResume()
         val s = apps().joinToString(",") { it.activityInfo.packageName }
@@ -116,15 +126,15 @@ class MainActivity : Activity() {
         scheduleWall()
         if (flag("wg_weather") && System.currentTimeMillis() - lastWx > 30 * 60_000L) fetchWeather()
     }
-
+ 
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(tick); handler.removeCallbacks(wallTask)
     }
-
+ 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() { /* el inicio no se cierra */ }
-
+ 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(rc: Int, res: Int, data: Intent?) {
         super.onActivityResult(rc, res, data)
@@ -133,21 +143,21 @@ class MainActivity : Activity() {
             if (q != null) ask(q)
         }
     }
-
+ 
     private val tick = object : Runnable { override fun run() { refreshStats(); handler.postDelayed(this, 2500) } }
     private val wallTask = object : Runnable { override fun run() { nextWall(); scheduleWall() } }
-
+ 
     private fun go(i: Intent, quiet: Boolean = false): Boolean = try {
         startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
     } catch (e: Exception) { if (!quiet) toast("No se pudo abrir"); false }
-
+ 
     private fun goPkg(p: String): Boolean {
         val i = packageManager.getLeanbackLaunchIntentForPackage(p) ?: packageManager.getLaunchIntentForPackage(p) ?: return false
         return go(i)
     }
-
+ 
     private fun isInstalled(p: String): Boolean = try { packageManager.getPackageInfo(p, 0); true } catch (e: Exception) { false }
-
+ 
     private fun apps(): List<ResolveInfo> {
         val pm = packageManager
         return listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)
@@ -156,18 +166,18 @@ class MainActivity : Activity() {
             .filter { it.activityInfo.packageName != packageName }
             .sortedBy { it.loadLabel(pm).toString().lowercase() }
     }
-
+ 
     private fun httpGet(u: String): String {
         val c = URL(u).openConnection() as HttpURLConnection
         c.connectTimeout = 10000; c.readTimeout = 15000
         return c.inputStream.bufferedReader().use { it.readText() }
     }
-
+ 
     // ---------- fondos ----------
     private fun userFiles(): List<File> =
         getExternalFilesDir("fondos")?.listFiles { f -> f.extension.lowercase() in setOf("jpg", "jpeg", "png", "webp") }
             ?.sortedBy { it.name } ?: emptyList()
-
+ 
     private fun walls(): List<Wall> {
         if (prefs.getInt("wallmode", 0) == 1) {
             return try {
@@ -180,7 +190,7 @@ class MainActivity : Activity() {
         }
         return userFiles().map { Wall(it, null, null, null) }
     }
-
+ 
     private fun decode(f: File): Bitmap? = try {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(f.path, o)
@@ -188,7 +198,7 @@ class MainActivity : Activity() {
         while (o.outWidth / (s * 2) >= 1920 && o.outHeight / (s * 2) >= 1080) s *= 2
         BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s })
     } catch (e: Throwable) { null }
-
+ 
     private fun loadWall(w: Wall, animate: Boolean) {
         Thread {
             val b = decode(w.file)
@@ -196,7 +206,7 @@ class MainActivity : Activity() {
             runOnUiThread { if (b != null) { wallBmp = b; blurBmp = bl; curWall = w; applyWall(animate); updateCaption() } }
         }.start()
     }
-
+ 
     private fun applyWall(animate: Boolean) {
         val layer = wallLayer ?: return
         val fit = prefs.getInt("fit", 0) == 1
@@ -211,7 +221,7 @@ class MainActivity : Activity() {
             put(); layer.animate().alpha(1f).setDuration(500).start()
         }.start()
     }
-
+ 
     private fun updateCaption() {
         val box = heroBox ?: return
         val w = curWall
@@ -225,20 +235,20 @@ class MainActivity : Activity() {
             box.visibility = View.VISIBLE
         } else box.visibility = View.GONE
     }
-
+ 
     private fun nextWall() {
         val ws = walls(); if (ws.isEmpty()) return
         val idx = (prefs.getInt("wall", -1) + 1) % ws.size
         prefs.edit().putInt("wall", idx).apply()
         loadWall(ws[idx], true)
     }
-
+ 
     private fun scheduleWall() {
         handler.removeCallbacks(wallTask)
         val s = autoSecs[prefs.getInt("auto", 0) % autoSecs.size]
         if (s > 0) handler.postDelayed(wallTask, s * 1000L)
     }
-
+ 
     private fun refreshCartelera() {
         val keyFile = File(getExternalFilesDir(null), "tmdb.txt")
         if (!keyFile.exists()) { toast("Falta tmdb.txt con tu clave (ver guía)"); return }
@@ -272,14 +282,14 @@ class MainActivity : Activity() {
             } catch (e: Exception) { runOnUiThread { toast("Error de cartelera: revisa tu clave de TMDB") } }
         }.start()
     }
-
+ 
     // ---------- clima ----------
     private fun wxDesc(c: Int): String = when (c) {
         0 -> "Despejado"; 1, 2 -> "Parcialmente nublado"; 3 -> "Nublado"; 45, 48 -> "Niebla"
         in 51..57 -> "Llovizna"; in 61..67, in 80..82 -> "Lluvia"; in 71..77, 85, 86 -> "Nieve"
         in 95..99 -> "Tormenta"; else -> ""
     }
-
+ 
     private fun fetchWeather() {
         lastWx = System.currentTimeMillis()
         Thread {
@@ -291,7 +301,7 @@ class MainActivity : Activity() {
             } catch (e: Exception) { lastWx = 0L }
         }.start()
     }
-
+ 
     // ---------- medidores ----------
     private inner class GaugeView(ctx: Context, val title: String) : View(ctx) {
         private var shown = 0f
@@ -304,7 +314,7 @@ class MainActivity : Activity() {
         private val num = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD }
         private val lab = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFD6D0E0.toInt(); textAlign = Paint.Align.CENTER }
         private val rect = RectF()
-
+ 
         fun set(v: Float, t: String, w: Boolean = false) {
             text = t; warn = w
             ValueAnimator.ofFloat(shown, v.coerceIn(0f, 1f)).apply {
@@ -313,7 +323,7 @@ class MainActivity : Activity() {
                 start()
             }
         }
-
+ 
         override fun onDraw(c: Canvas) {
             val w = width.toFloat(); val cx = w / 2; val cy = height / 2f
             val ring = prefs.getInt("gstyle", 0) % 2 == 1
@@ -345,10 +355,10 @@ class MainActivity : Activity() {
             c.drawText(text, cx, cy + r * 0.93f, num)
         }
     }
-
+ 
     private fun gauge(title: String): GaugeView = GaugeView(this, title)
     private fun btOn(): Boolean = try { BluetoothAdapter.getDefaultAdapter()?.isEnabled == true } catch (e: Throwable) { false }
-
+ 
     private fun pill(label: String, on: Boolean): View {
         val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         row.addView(View(this).apply {
@@ -358,7 +368,7 @@ class MainActivity : Activity() {
         row.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(12) }
         return row
     }
-
+ 
     private fun fillStatus(row: LinearLayout) {
         row.removeAllViews()
         try {
@@ -369,7 +379,7 @@ class MainActivity : Activity() {
         } catch (e: Throwable) { }
         row.addView(pill("Bluetooth", btOn()))
     }
-
+ 
     @Suppress("DEPRECATION")
     private fun refreshStats() {
         ramG?.let {
@@ -404,12 +414,12 @@ class MainActivity : Activity() {
         statusRow?.let { fillStatus(it) }
         refreshMedia()
     }
-
+ 
     // ---------- piezas de interfaz ----------
     private fun dark(r: Int): GradientDrawable = GradientDrawable().apply {
         cornerRadius = dp(r).toFloat(); setColor(0xB0080810.toInt()); setStroke(dp(1), 0x22FFFFFF)
     }
-
+ 
     // estilos de tarjeta: 0 cristal, 1 sólido, 2 neón
     private fun glass(focused: Boolean, radius: Int): GradientDrawable {
         val a = skin.accent
@@ -432,7 +442,7 @@ class MainActivity : Activity() {
             cornerRadius = dp(radius).toFloat(); setStroke(dp(sw), sc)
         }
     }
-
+ 
     private fun focusable(v: View, radius: Int, onClick: () -> Unit, onLong: (() -> Unit)? = null, pop: View? = null, popScale: Float = 1.18f): View {
         v.isFocusable = true; v.isClickable = true; v.clipToOutline = true
         fun paint(f: Boolean) {
@@ -440,12 +450,12 @@ class MainActivity : Activity() {
             pop?.animate()?.scaleX(if (f) popScale else 1f)?.scaleY(if (f) popScale else 1f)?.setDuration(180)?.start()
         }
         paint(false)
-        v.setOnFocusChangeListener { _, f -> paint(f) }
-        v.setOnClickListener { onClick() }
+        v.setOnFocusChangeListener { _, f -> paint(f); if (f) sfx(0) }
+        v.setOnClickListener { sfx(1); onClick() }
         if (onLong != null) v.setOnLongClickListener { onLong(); true }
         return v
     }
-
+ 
     private fun tile(label: String, icon: Drawable?, onClick: () -> Unit, onLong: () -> Unit): View {
         val s = scale
         val v = LinearLayout(this).apply {
@@ -463,7 +473,7 @@ class MainActivity : Activity() {
         })
         return focusable(v, 22, onClick, onLong, iv, 1.15f)
     }
-
+ 
     private fun wideTile(ri: ResolveInfo): View {
         val pm = packageManager; val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(pm).toString()
         val banner = try { ri.activityInfo.loadBanner(pm) ?: ri.activityInfo.applicationInfo.loadBanner(pm) } catch (e: Throwable) { null }
@@ -473,12 +483,12 @@ class MainActivity : Activity() {
         f.addView(img, FrameLayout.LayoutParams(MATCH, MATCH))
         return focusable(f, 22, { goPkg(pkg) }, { appMenu(pkg, label) }, img, 1.08f)
     }
-
+ 
     private fun appTile(ri: ResolveInfo): View {
         val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(packageManager).toString()
         return tile(label, ri.loadIcon(packageManager), { goPkg(pkg) }, { appMenu(pkg, label) })
     }
-
+ 
     private fun chip(label: String, onClick: () -> Unit): View {
         val t = TextView(this).apply {
             text = label; textSize = 14f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
@@ -487,7 +497,7 @@ class MainActivity : Activity() {
         }
         return focusable(t, 30, onClick)
     }
-
+ 
     private fun shelf(title: String, content: View): View {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(12), dp(16), dp(8)); background = dark(26)
@@ -500,12 +510,12 @@ class MainActivity : Activity() {
         box.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(14) }
         return box
     }
-
+ 
     private fun hrow(content: View): HorizontalScrollView = HorizontalScrollView(this).apply {
         isHorizontalScrollBarEnabled = false; clipToPadding = false
         setPadding(dp(4), dp(8), dp(4), dp(8)); addView(content)
     }
-
+ 
     // ---------- pantalla principal ----------
     private fun decodeThumb(f: File): Bitmap? = try {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -514,7 +524,7 @@ class MainActivity : Activity() {
         while (o.outWidth / (s * 2) >= 480) s *= 2
         BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s })
     } catch (e: Throwable) { null }
-
+ 
     private fun thumbRow(ws: List<Wall>): View {
         val r = LinearLayout(this)
         ws.take(14).forEachIndexed { i, w ->
@@ -533,7 +543,7 @@ class MainActivity : Activity() {
         }
         return r
     }
-
+ 
     private fun mediaCard(): LinearLayout {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -567,12 +577,12 @@ class MainActivity : Activity() {
         mediaBox = card; mediaCtl = ctl; mediaArt = art; mediaTitle = ti; mediaArtist = ar; mediaPlay = pl as TextView
         return card
     }
-
+ 
     private fun togglePlay() {
         val c = ctrl ?: return
         if (c.playbackState?.state == PlaybackState.STATE_PLAYING) c.transportControls.pause() else c.transportControls.play()
     }
-
+ 
     private fun refreshMedia() {
         val box = mediaBox ?: return
         try {
@@ -596,7 +606,7 @@ class MainActivity : Activity() {
             mediaArt?.setImageDrawable(null); mediaCtl?.visibility = View.GONE; box.visibility = View.VISIBLE
         } catch (e: Throwable) { box.visibility = View.GONE }
     }
-
+ 
     private fun build() {
         val hidden = getSet("hidden"); val favs = getSet("fav")
         val visible = apps().filter { it.activityInfo.packageName !in hidden }
@@ -606,7 +616,7 @@ class MainActivity : Activity() {
         val tileW = dp((168 * s).toInt()); val tileH = dp((124 * s).toInt())
         ramG = null; diskG = null; netG = null; statusRow = null; weatherView = null
         mediaBox = null; heroBox = null
-
+ 
         val root = FrameLayout(this).apply {
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(skin.top, skin.bottom))
         }
@@ -622,9 +632,9 @@ class MainActivity : Activity() {
         val ws = walls()
         if (wallBmp != null) applyWall(false)
         else if (ws.isNotEmpty()) loadWall(ws[prefs.getInt("wall", 0).coerceIn(0, ws.size - 1)], false)
-
+ 
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
+ 
         // barra superior: botones a la izquierda, fecha, clima y hora a la derecha
         val bar = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL; setPadding(dp(36), dp(6), dp(36), dp(6)); setBackgroundColor(0x77000000)
@@ -653,7 +663,7 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE); setShadowLayer(6f, 0f, 2f, Color.BLACK)
         })
         col.addView(bar, LinearLayout.LayoutParams(MATCH, WRAP))
-
+ 
         // portada: título de cartelera a la izquierda, widgets a la derecha
         val hero = FrameLayout(this).apply { minimumHeight = (resources.displayMetrics.heightPixels * 0.40f).toInt() }
         val hb = LinearLayout(this).apply {
@@ -672,7 +682,7 @@ class MainActivity : Activity() {
         hb.addView(heroProv); hb.addView(heroTitle, LinearLayout.LayoutParams(dp(460), WRAP))
         hb.addView(btn, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(12) })
         hero.addView(hb, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START))
-
+ 
         val side = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(10), dp(36), dp(10)) }
         if (flag("wg_gauges") || flag("wg_status")) {
             val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(8)); background = dark(26) }
@@ -690,7 +700,7 @@ class MainActivity : Activity() {
         }
         if (flag("wg_media")) side.addView(mediaCard(), LinearLayout.LayoutParams(MATCH, WRAP))
         if (side.childCount > 0) hero.addView(side, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.END or Gravity.CENTER_VERTICAL))
-
+ 
         // estantes
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(hero, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -714,21 +724,23 @@ class MainActivity : Activity() {
         content.addView(shelves, LinearLayout.LayoutParams(MATCH, WRAP))
         content.alpha = 0f; content.translationY = dp(24).toFloat()
         content.animate().alpha(1f).translationY(0f).setDuration(450).start()
-
+ 
         col.addView(ScrollView(this).apply {
             isVerticalScrollBarEnabled = false; clipToPadding = false; setPadding(0, 0, 0, dp(56)); addView(content)
         }, LinearLayout.LayoutParams(MATCH, 0, 1f))
-
+ 
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
         val fx = seasonFx()
         if (fx.isNotEmpty()) root.addView(SeasonView(this, fx), FrameLayout.LayoutParams(MATCH, MATCH))
+        if (!splashShown && flag("splash")) { splashShown = true; root.addView(splashView(), FrameLayout.LayoutParams(MATCH, MATCH)) }
+        sfxReady = false; handler.postDelayed({ sfxReady = true }, 900)
         setContentView(root)
         chips.getChildAt(0)?.requestFocus()
         updateCaption()
         refreshStats()
         if (flag("wg_weather")) { lastWx = 0L; fetchWeather() }
     }
-
+ 
     // ---------- temporadas ----------
     private fun seasonFx(): Set<String> {
         return when (prefs.getInt("season", 0) % 6) {
@@ -748,7 +760,7 @@ class MainActivity : Activity() {
             }
         }
     }
-
+ 
     private inner class SeasonView(ctx: Context, val fx: Set<String>) : View(ctx) {
         private val n = 26
         private val px = FloatArray(n); private val py = FloatArray(n); private val pv = FloatArray(n)
@@ -757,7 +769,7 @@ class MainActivity : Activity() {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val path = Path()
         private val oval = RectF()
-
+ 
         init {
             val rnd = java.util.Random(7)
             for (i in 0 until n) {
@@ -765,7 +777,7 @@ class MainActivity : Activity() {
                 ps[i] = 0.6f + rnd.nextFloat() * 0.8f; pp[i] = rnd.nextFloat() * 6.28f
             }
         }
-
+ 
         private fun heart(c: Canvas, x: Float, y: Float, s: Float) {
             paint.color = 0xAAFF5C8A.toInt()
             path.reset(); path.moveTo(x, y + s * 0.35f)
@@ -773,7 +785,7 @@ class MainActivity : Activity() {
             path.cubicTo(x + s * 0.5f, y - s, x + s, y - s * 0.3f, x, y + s * 0.35f)
             c.drawPath(path, paint)
         }
-
+ 
         private fun web(c: Canvas, size: Float) {
             paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(1).toFloat(); paint.color = 0x88FFFFFF.toInt()
             val steps = 6
@@ -796,7 +808,7 @@ class MainActivity : Activity() {
             }
             paint.style = Paint.Style.FILL
         }
-
+ 
         private fun pumpkin(c: Canvas, cx: Float, cy: Float, s: Float) {
             paint.color = 0xFFFF7A1A.toInt(); oval.set(cx - s, cy - s * 0.8f, cx + s, cy + s * 0.8f); c.drawOval(oval, paint)
             paint.color = 0xFF3B7D23.toInt(); c.drawRect(cx - s * 0.12f, cy - s * 1.0f, cx + s * 0.12f, cy - s * 0.72f, paint)
@@ -808,7 +820,7 @@ class MainActivity : Activity() {
             path.lineTo(cx + s * 0.5f, cy + s * 0.2f); path.lineTo(cx + s * 0.25f, cy + s * 0.65f); path.lineTo(cx - s * 0.25f, cy + s * 0.65f); path.close()
             c.drawPath(path, paint)
         }
-
+ 
         override fun onDraw(c: Canvas) {
             val w = width.toFloat(); val h = height.toFloat()
             val now = System.nanoTime()
@@ -861,7 +873,7 @@ class MainActivity : Activity() {
             postInvalidateDelayed(40)
         }
     }
-
+ 
     private fun appMenu(pkg: String, label: String) {
         val isFav = pkg in getSet("fav")
         val opts = arrayOf(if (isFav) "Quitar de favoritas" else "Fijar en favoritas", "Ocultar app", "Cancelar")
@@ -872,7 +884,7 @@ class MainActivity : Activity() {
             }
         }.show()
     }
-
+ 
     // ---------- paneles ----------
     private fun panel(title: String, items: List<Opt>, note: String? = null) {
         val d = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
@@ -905,22 +917,22 @@ class MainActivity : Activity() {
         d.show()
         first?.requestFocus()
     }
-
+ 
     private fun labelOf(i: TvInputInfo): String =
         i.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() } ?: i.loadLabel(this)?.toString() ?: "Entrada"
-
+ 
     private fun passInputs(): List<TvInputInfo> = try {
         (getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager).tvInputList.filter { it.isPassthroughInput }.sortedBy { labelOf(it) }
     } catch (e: Exception) { emptyList() }
-
+ 
     private fun openTv() {
         if (!go(Intent(Intent.ACTION_VIEW, TvContract.Channels.CONTENT_URI), true)) {
             if (!goPkg("com.mediatek.wwtv.tvcenter")) toast("No se pudo abrir la TV")
         }
     }
-
+ 
     private fun openInput(i: TvInputInfo) { go(Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(i.id))) }
-
+ 
     private fun inputPanel() {
         val inputs = passInputs()
         val items = mutableListOf<Opt>()
@@ -928,11 +940,11 @@ class MainActivity : Activity() {
         inputs.forEach { inp -> items.add(Opt(labelOf(inp)) { openInput(inp) }) }
         panel("Entrada", items, if (inputs.isEmpty()) "No se detectaron entradas HDMI/AV. Usa el botón de entrada del control." else null)
     }
-
+ 
     // ---------- asistente (Claude) ----------
     private fun claudeKey(): String? =
         File(getExternalFilesDir(null), "claude.txt").takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
-
+ 
     private fun gptConf(): Pair<String, String>? {
         val f = File(getExternalFilesDir(null), "openai.txt")
         if (!f.exists()) return null
@@ -940,7 +952,7 @@ class MainActivity : Activity() {
         if (lines.isEmpty()) return null
         return Pair(lines[0], if (lines.size > 1) lines[1] else "gpt-4o-mini")
     }
-
+ 
     private fun assistantPanel(note: String? = null) {
         val gpt = prefs.getInt("ai", 0) == 1
         val ready = if (gpt) gptConf() != null else claudeKey() != null
@@ -953,7 +965,7 @@ class MainActivity : Activity() {
         panel("Asistente", items, note ?: if (!ready) "Falta ${if (gpt) "openai.txt" else "claude.txt"} con tu clave (ver guía)."
             else "Pídeme abrir una app, cambiar de entrada o pregúntame lo que quieras.")
     }
-
+ 
     private fun listen() {
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -961,14 +973,14 @@ class MainActivity : Activity() {
             .putExtra(RecognizerIntent.EXTRA_PROMPT, "Habla ahora")
         try { startActivityForResult(i, 77) } catch (e: Exception) { toast("Sin reconocimiento de voz; usa Escribir") }
     }
-
+ 
     private fun typeQuestion() {
         val et = EditText(this).apply { hint = "¿Qué quieres hacer?"; isSingleLine = true }
         AlertDialog.Builder(this).setTitle("Asistente").setView(et)
             .setPositiveButton("Enviar") { _, _ -> val q = et.text.toString().trim(); if (q.isNotEmpty()) ask(q) }
             .setNegativeButton("Cancelar", null).show()
     }
-
+ 
     private fun ask(q: String) {
         val gpt = prefs.getInt("ai", 0) == 1
         val key: String? = if (gpt) gptConf()?.first else claudeKey()
@@ -1008,7 +1020,7 @@ class MainActivity : Activity() {
             runOnUiThread { handleReply(reply) }
         }.start()
     }
-
+ 
     private fun handleReply(raw: String) {
         var say = raw; var type = ""; var name = ""
         try {
@@ -1037,13 +1049,13 @@ class MainActivity : Activity() {
             "next_wall" -> nextWall()
         }
     }
-
+ 
     // ---------- personalización ----------
     private fun onOff(b: Boolean): String = if (b) "Sí" else "No"
-
+ 
     private fun toggle(key: String, label: String): Opt =
         Opt("$label: ${onOff(flag(key))}") { prefs.edit().putBoolean(key, !flag(key)).apply(); build(); widgetsPanel() }
-
+ 
     private fun widgetsPanel() {
         panel("Widgets", listOf(
             toggle("wg_gauges", "Medidores (RAM, disco, red)"),
@@ -1053,7 +1065,7 @@ class MainActivity : Activity() {
             Opt("Volver") { customPanel() }
         ))
     }
-
+ 
     private fun wallPanel() {
         val mode = prefs.getInt("wallmode", 0)
         val fit = prefs.getInt("fit", 0)
@@ -1075,9 +1087,103 @@ class MainActivity : Activity() {
             Opt("Volver") { customPanel() }
         ), "Mis imágenes: ${userFiles().size} en la carpeta. Cartelera: datos de TMDB (no certificado por TMDB).")
     }
-
+ 
+    // ---------- sonidos ----------
+    private fun sndMode(): Int = prefs.getInt("snd", 1) % 4
+ 
+    private fun synth(f1: Double, f2: Double, ms: Int, wave: Int): ShortArray {
+        val rate = 22050; val n = rate * ms / 1000
+        val out = ShortArray(n); var ph = 0.0
+        for (i in 0 until n) {
+            val t = i.toDouble() / n
+            ph += 2 * Math.PI * (f1 + (f2 - f1) * t) / rate
+            var v = Math.sin(ph)
+            if (wave == 2) v = if (v >= 0) 0.6 else -0.6
+            else if (wave == 1) v = (v + 0.4 * Math.sin(ph * 2)) / 1.4
+            val env = Math.pow(1.0 - t, 1.6) * minOf(1.0, i / 80.0)
+            out[i] = (v * env * 0.6 * 32767).toInt().toShort()
+        }
+        return out
+    }
+ 
+    private fun writeWav(f: File, pcm: ShortArray, rate: Int) {
+        val bb = java.nio.ByteBuffer.allocate(44 + pcm.size * 2).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        bb.put("RIFF".toByteArray()); bb.putInt(36 + pcm.size * 2); bb.put("WAVE".toByteArray()); bb.put("fmt ".toByteArray())
+        bb.putInt(16); bb.putShort(1.toShort()); bb.putShort(1.toShort()); bb.putInt(rate); bb.putInt(rate * 2)
+        bb.putShort(2.toShort()); bb.putShort(16.toShort()); bb.put("data".toByteArray()); bb.putInt(pcm.size * 2)
+        for (x in pcm) bb.putShort(x)
+        f.writeBytes(bb.array())
+    }
+ 
+    private fun loadSounds() {
+        try {
+            sp?.release()
+            val s2 = SoundPool.Builder().setMaxStreams(4).setAudioAttributes(
+                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()).build()
+            sp = s2; sndIds.clear()
+            val wave = (sndMode() - 1).coerceAtLeast(0)
+            val files = listOf(
+                Pair("move", synth(900.0, 1150.0, 35, wave)),
+                Pair("select", synth(650.0, 1300.0, 90, wave)),
+                Pair("intro", synth(523.0, 523.0, 130, wave) + synth(659.0, 659.0, 130, wave) + synth(784.0, 784.0, 380, wave))
+            )
+            for (pr in files) {
+                val f = File(cacheDir, "sfx${wave}_${pr.first}.wav")
+                if (!f.exists()) writeWav(f, pr.second, 22050)
+                sndIds.add(s2.load(f.path, 1))
+            }
+        } catch (e: Throwable) { }
+    }
+ 
+    // 0 mover, 1 seleccionar, 2 intro
+    private fun sfx(kind: Int, force: Boolean = false) {
+        if ((!sfxReady && !force) || sndMode() == 0) return
+        val now = System.currentTimeMillis()
+        if (kind == 0 && now - lastSfx < 45) return
+        lastSfx = now
+        val id = sndIds.getOrNull(kind) ?: return
+        val v = floatArrayOf(0.35f, 0.65f, 1f)[prefs.getInt("sndvol", 1) % 3]
+        sp?.play(id, v, v, 1, 0, 1f)
+    }
+ 
+    // ---------- bienvenida al encender ----------
+    private fun splashView(): View {
+        val f = FrameLayout(this).apply { setBackgroundColor(0xFF05050A.toInt()) }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
+        val logo = File(getExternalFilesDir(null), "splash.png")
+        val bmp = if (logo.exists()) decodeThumb(logo) else null
+        if (bmp != null) {
+            col.addView(ImageView(this).apply { setImageBitmap(bmp); scaleType = ImageView.ScaleType.FIT_CENTER },
+                LinearLayout.LayoutParams(dp(260), dp(160)))
+        } else {
+            val ring = View(this).apply {
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0); setStroke(dp(3), skin.accent) }
+                scaleX = 0.5f; scaleY = 0.5f
+            }
+            col.addView(ring, LinearLayout.LayoutParams(dp(84), dp(84)))
+            ring.animate().scaleX(1f).scaleY(1f).setDuration(1400).start()
+        }
+        val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val hi = if (h < 12) "Buenos días" else if (h < 19) "Buenas tardes" else "Buenas noches"
+        val nm = File(getExternalFilesDir(null), "nombre.txt").takeIf { it.exists() }?.readText()?.trim().orEmpty()
+        col.addView(TextView(this).apply {
+            text = if (nm.isEmpty()) hi else "$hi, $nm"; textSize = 40f; typeface = light()
+            setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, dp(22), 0, dp(6))
+        })
+        col.addView(TextView(this).apply { text = "MI LAUNCHER"; textSize = 13f; letterSpacing = 0.5f; setTextColor(skin.accent) })
+        f.addView(col, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
+        col.alpha = 0f
+        col.animate().alpha(1f).setDuration(900).start()
+        handler.postDelayed({ sfx(2, true) }, 400)
+        handler.postDelayed({
+            f.animate().alpha(0f).setDuration(700).withEndAction { (f.parent as? ViewGroup)?.removeView(f) }.start()
+        }, 2600)
+        return f
+    }
+ 
     private fun dnsOn(): Boolean = try { Settings.Global.getString(contentResolver, "private_dns_mode") == "hostname" } catch (e: Throwable) { false }
-
+ 
     private fun toggleDns() {
         try {
             if (dnsOn()) {
@@ -1093,7 +1199,7 @@ class MainActivity : Activity() {
                 "Ejecuta una vez en tu PC:  adb shell pm grant com.alejandro.tvlauncher android.permission.WRITE_SECURE_SETTINGS")
         }
     }
-
+ 
     private fun stylePanel() {
         panel("Estilo", listOf(
             Opt("Tema de color: ${skin.name}") { prefs.edit().putInt("theme", prefs.getInt("theme", 0) + 1).apply(); build(); stylePanel() },
@@ -1104,12 +1210,19 @@ class MainActivity : Activity() {
             Opt("Volver") { customPanel() }
         ))
     }
-
+ 
     private fun customPanel() {
         panel("Personalizar", listOf(
             Opt("Estilo…") { stylePanel() },
             Opt("Fondos…") { wallPanel() },
             Opt("Widgets…") { widgetsPanel() },
+            Opt("Sonidos de navegación: ${sndNames[sndMode()]}") {
+                prefs.edit().putInt("snd", (sndMode() + 1) % 4).apply(); loadSounds(); sfxReady = true; sfx(1); customPanel()
+            },
+            Opt("Volumen de sonidos: ${volNames[prefs.getInt("sndvol", 1) % 3]}") {
+                prefs.edit().putInt("sndvol", prefs.getInt("sndvol", 1) + 1).apply(); sfx(1); customPanel()
+            },
+            toggle("splash", "Pantalla de bienvenida"),
             toggle("tts", "Voz del asistente"),
             Opt("Bloqueo de anuncios por DNS: ${onOff(dnsOn())}") { toggleDns() },
             Opt("Mostrar apps ocultas") { putSet("hidden", emptySet()); build() },
@@ -1117,5 +1230,5 @@ class MainActivity : Activity() {
         ))
     }
 }
-
+ 
 class MediaListener : android.service.notification.NotificationListenerService()
