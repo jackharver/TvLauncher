@@ -22,6 +22,7 @@ import android.media.tv.TvInputInfo
 import android.media.tv.TvInputManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.TrafficStats
 import android.net.wifi.WifiManager
 import android.os.*
 import android.provider.Settings
@@ -34,6 +35,7 @@ import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.Inet4Address
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Calendar
@@ -69,6 +71,28 @@ class MainActivity : Activity() {
     private var wallLayer: FrameLayout? = null
     private var wallView: ImageView? = null
     private var wallBlur: ImageView? = null
+    private class Stats {
+        var ram = 0f; var disk = 0f; var temp = -1f; var mbps = 0f; var sig = 0f
+        var wifi = false; var lan = false; var inet = false
+        var availMb = 0L; var freeGb = 0f; var ip = "—"
+    }
+    private val stat = Stats()
+    private var lastRx = -1L
+    private var lastRxT = 0L
+    private var hdmiOn = false
+    private var musicOn = false
+    private var tempG: GaugeView? = null
+    private var clusterV: ClusterView? = null
+    private var segV: SegView? = null
+    private var sportV: SportBar? = null
+    private val indicators = mutableListOf<IndicatorView>()
+    private var sysInfo: TextView? = null
+    private var wxBig: TextView? = null
+    private var wxDesc2: TextView? = null
+    private var wxDetail: TextView? = null
+    private var wxTom: TextView? = null
+    private val gNames = arrayOf("Aguja", "Anillo", "Cluster", "Segmentos")
+    private val barNames = arrayOf("Clásica", "Tablero", "Deportiva")
     private var ramG: GaugeView? = null
     private var diskG: GaugeView? = null
     private var netG: GaugeView? = null
@@ -144,7 +168,7 @@ class MainActivity : Activity() {
         }
     }
  
-    private val tick = object : Runnable { override fun run() { refreshStats(); handler.postDelayed(this, 2500) } }
+    private val tick = object : Runnable { override fun run() { refreshStats(); handler.postDelayed(this, if (liteOn()) 6000L else 2500L) } }
     private val wallTask = object : Runnable { override fun run() { nextWall(); scheduleWall() } }
  
     private fun go(i: Intent, quiet: Boolean = false): Boolean = try {
@@ -216,7 +240,7 @@ class MainActivity : Activity() {
             wallBlur?.setImageBitmap(blurBmp)
             wallBlur?.visibility = if (fit) View.VISIBLE else View.GONE
         }
-        if (!animate) { put(); return }
+        if (!animate || liteOn()) { put(); return }
         layer.animate().alpha(0f).setDuration(250).withEndAction {
             put(); layer.animate().alpha(1f).setDuration(500).start()
         }.start()
@@ -295,9 +319,14 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val lat = prefs.getFloat("lat", 19.93f); val lon = prefs.getFloat("lon", -96.85f)
-                val j = JSONObject(httpGet("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code&timezone=auto")).getJSONObject("current")
-                val txt = "${Math.round(j.getDouble("temperature_2m"))}° · ${wxDesc(j.getInt("weather_code"))}"
-                runOnUiThread { weatherView?.text = txt }
+                val root = JSONObject(httpGet("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code,relative_humidity_2m,apparent_temperature,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days=2&timezone=auto"))
+                val j = root.getJSONObject("current"); val d = root.getJSONObject("daily")
+                val t = Math.round(j.getDouble("temperature_2m"))
+                val desc = wxDesc(j.getInt("weather_code"))
+                val top = "$t° · $desc"
+                val detail = "Sensación ${Math.round(j.optDouble("apparent_temperature"))}° · Humedad ${j.optInt("relative_humidity_2m")}% · Viento ${Math.round(j.optDouble("wind_speed_10m"))} km/h"
+                val tom = "Mañana: ${Math.round(d.getJSONArray("temperature_2m_min").getDouble(1))}°–${Math.round(d.getJSONArray("temperature_2m_max").getDouble(1))}° · Lluvia ${d.getJSONArray("precipitation_probability_max").optInt(1)}%"
+                runOnUiThread { weatherView?.text = top; wxBig?.text = "$t°"; wxDesc2?.text = desc; wxDetail?.text = detail; wxTom?.text = tom }
             } catch (e: Exception) { lastWx = 0L }
         }.start()
     }
@@ -326,7 +355,7 @@ class MainActivity : Activity() {
  
         override fun onDraw(c: Canvas) {
             val w = width.toFloat(); val cx = w / 2; val cy = height / 2f
-            val ring = prefs.getInt("gstyle", 0) % 2 == 1
+            val ring = prefs.getInt("gstyle", 0) % 4 == 1
             val sw = w * (if (ring) 0.11f else 0.075f); val r = w / 2 - sw * 1.5f
             track.strokeWidth = sw; prog.strokeWidth = sw
             rect.set(cx - r, cy - r, cx + r, cy + r)
@@ -380,39 +409,237 @@ class MainActivity : Activity() {
         row.addView(pill("Bluetooth", btOn()))
     }
  
+    private fun readTemp(): Float {
+        var best = -1f
+        try {
+            File("/sys/class/thermal").listFiles { f -> f.name.startsWith("thermal_zone") }?.forEach {
+                try {
+                    val v = File(it, "temp").readText().trim().toFloat()
+                    val c = if (v > 1000f) v / 1000f else v
+                    if (c in 10f..120f && c > best) best = c
+                } catch (e: Throwable) { }
+            }
+        } catch (e: Throwable) { }
+        return best
+    }
+ 
+    private fun ease(cur: Float, target: Float): Float = cur + (target - cur) * 0.18f
+ 
+    private fun segs(c: Canvas, p: Paint, path: Path, x: Float, y: Float, w: Float, h: Float, v: Float, n: Int) {
+        val gap = dp(3).toFloat(); val sw = (w - gap * (n - 1)) / n; val sl = h * 0.35f
+        p.style = Paint.Style.FILL
+        for (i in 0 until n) {
+            val x0 = x + i * (sw + gap)
+            val on = (i + 1f) / n <= v + 0.001f
+            val red = i >= n * 0.8f
+            p.color = if (on) (if (red) 0xFFFF3B30.toInt() else skin.accent) else (if (red) 0x55FF3B30 else 0x33FFFFFF)
+            path.reset(); path.moveTo(x0 + sl, y); path.lineTo(x0 + sw + sl, y); path.lineTo(x0 + sw, y + h); path.lineTo(x0, y + h); path.close()
+            c.drawPath(path, p)
+        }
+    }
+ 
     @Suppress("DEPRECATION")
     private fun refreshStats() {
-        ramG?.let {
+        try {
             val mi = ActivityManager.MemoryInfo()
             (getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(mi)
-            val used = (mi.totalMem - mi.availMem).toFloat() / mi.totalMem
-            it.set(used, "${(used * 100).toInt()}%", used > 0.85f)
+            stat.ram = (mi.totalMem - mi.availMem).toFloat() / mi.totalMem
+            stat.availMb = mi.availMem / 1048576L
+        } catch (e: Throwable) { }
+        try {
+            val d = StatFs(Environment.getDataDirectory().path)
+            stat.disk = (d.totalBytes - d.availableBytes).toFloat() / d.totalBytes
+            stat.freeGb = d.availableBytes / 1.0e9f
+        } catch (e: Throwable) { }
+        stat.temp = readTemp()
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            stat.lan = caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
+            stat.wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            stat.inet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            stat.sig = if (stat.lan) 1f else if (stat.wifi) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                ((wm.connectionInfo.rssi + 100) * 2).coerceIn(0, 100) / 100f
+            } else 0f
+            stat.ip = cm.getLinkProperties(cm.activeNetwork)?.linkAddresses?.map { it.address }
+                ?.firstOrNull { it is Inet4Address }?.hostAddress ?: "—"
+        } catch (e: Throwable) { }
+        val rx = TrafficStats.getTotalRxBytes(); val t = SystemClock.elapsedRealtime()
+        if (lastRx >= 0 && t > lastRxT && rx >= lastRx) {
+            val m = (rx - lastRx) * 8f / 1e6f / ((t - lastRxT) / 1000f)
+            stat.mbps = stat.mbps * 0.5f + m * 0.5f
         }
-        diskG?.let {
-            try {
-                val st = StatFs(Environment.getDataDirectory().path)
-                val used = (st.totalBytes - st.availableBytes).toFloat() / st.totalBytes
-                it.set(used, "${(used * 100).toInt()}%", used > 0.9f)
-            } catch (e: Throwable) { }
-        }
+        lastRx = rx; lastRxT = t
+        try {
+            val l = (getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager).getActiveSessions(ComponentName(this, MediaListener::class.java))
+            musicOn = l.any { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+        } catch (e: Throwable) { musicOn = false }
+        try {
+            val tim = getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager
+            hdmiOn = tim.tvInputList.any { it.isPassthroughInput && tim.getInputState(it.id) == TvInputManager.INPUT_STATE_CONNECTED }
+        } catch (e: Throwable) { hdmiOn = false }
+ 
+        ramG?.set(stat.ram, "${(stat.ram * 100).toInt()}%", stat.ram > 0.85f)
+        diskG?.set(stat.disk, "${(stat.disk * 100).toInt()}%", stat.disk > 0.9f)
+        tempG?.let { if (stat.temp < 0f) it.set(0f, "N/D") else it.set(stat.temp / 100f, "${stat.temp.toInt()}°", stat.temp > 75f) }
         netG?.let {
-            try {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-                when {
-                    caps == null -> it.set(0f, "OFF", true)
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> it.set(1f, "LAN")
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> {
-                        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                        val pct = ((wm.connectionInfo.rssi + 100) * 2).coerceIn(0, 100) / 100f
-                        it.set(pct, "${(pct * 100).toInt()}%", pct < 0.3f)
-                    }
-                    else -> it.set(0.5f, "RED")
-                }
-            } catch (e: Throwable) { }
+            if (!stat.inet && !stat.lan && !stat.wifi) it.set(0f, "OFF", true)
+            else if (stat.lan) it.set(1f, "LAN") else it.set(stat.sig, "${(stat.sig * 100).toInt()}%", stat.sig < 0.3f)
+        }
+        clusterV?.invalidate(); segV?.invalidate(); sportV?.invalidate()
+        indicators.forEach { ind ->
+            ind.lit = when (ind.kind) { 0 -> stat.wifi; 1 -> stat.lan; 2 -> btOn(); 3 -> hdmiOn; 4 -> musicOn; 5 -> dnsOn(); else -> stat.inet }
+            ind.invalidate()
         }
         statusRow?.let { fillStatus(it) }
+        val up = SystemClock.elapsedRealtime() / 60000
+        sysInfo?.text = "Memoria libre: ${stat.availMb} MB\nDisco libre: ${"%.1f".format(stat.freeGb)} GB\nEncendida: ${up / 60} h ${up % 60} min\nIP: ${stat.ip}\nDescarga: ${"%.1f".format(stat.mbps)} Mbps"
         refreshMedia()
+    }
+ 
+    // ---------- indicadores tipo tablero ----------
+    private inner class IndicatorView(ctx: Context, val kind: Int) : View(ctx) {
+        var lit = false
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val path = Path()
+        private val rect = RectF()
+        override fun onDraw(c: Canvas) {
+            val s = width.toFloat(); val cx = s / 2; val cy = s / 2
+            p.color = if (lit) (if (kind == 5) 0xFF7BE08F.toInt() else skin.accent) else 0x33FFFFFF
+            p.style = Paint.Style.STROKE; p.strokeWidth = s * 0.075f; p.strokeCap = Paint.Cap.ROUND; p.strokeJoin = Paint.Join.ROUND
+            when (kind) {
+                0 -> {
+                    for (i in 1..3) { val r = s * 0.2f * i; rect.set(cx - r, cy + s * 0.3f - r, cx + r, cy + s * 0.3f + r); c.drawArc(rect, 225f, 90f, false, p) }
+                    p.style = Paint.Style.FILL; c.drawCircle(cx, cy + s * 0.3f, s * 0.06f, p)
+                }
+                1 -> {
+                    rect.set(cx - s * 0.32f, cy - s * 0.22f, cx + s * 0.32f, cy + s * 0.18f); c.drawRoundRect(rect, s * 0.05f, s * 0.05f, p)
+                    c.drawLine(cx - s * 0.16f, cy + s * 0.18f, cx - s * 0.16f, cy + s * 0.34f, p)
+                    c.drawLine(cx + s * 0.16f, cy + s * 0.18f, cx + s * 0.16f, cy + s * 0.34f, p)
+                    c.drawLine(cx - s * 0.3f, cy + s * 0.34f, cx + s * 0.3f, cy + s * 0.34f, p)
+                }
+                2 -> {
+                    path.reset(); path.moveTo(cx - s * 0.25f, cy - s * 0.2f); path.lineTo(cx + s * 0.25f, cy + s * 0.2f); path.lineTo(cx, cy + s * 0.4f)
+                    path.lineTo(cx, cy - s * 0.4f); path.lineTo(cx + s * 0.25f, cy - s * 0.2f); path.lineTo(cx - s * 0.25f, cy + s * 0.2f); c.drawPath(path, p)
+                }
+                3 -> {
+                    path.reset(); path.moveTo(cx - s * 0.4f, cy - s * 0.25f); path.lineTo(cx + s * 0.4f, cy - s * 0.25f); path.lineTo(cx + s * 0.4f, cy + s * 0.05f)
+                    path.lineTo(cx + s * 0.22f, cy + s * 0.32f); path.lineTo(cx - s * 0.22f, cy + s * 0.32f); path.lineTo(cx - s * 0.4f, cy + s * 0.05f); path.close(); c.drawPath(path, p)
+                }
+                4 -> {
+                    p.style = Paint.Style.FILL; c.drawCircle(cx - s * 0.14f, cy + s * 0.28f, s * 0.15f, p)
+                    p.style = Paint.Style.STROKE; c.drawLine(cx + s * 0.01f, cy + s * 0.28f, cx + s * 0.01f, cy - s * 0.38f, p)
+                    c.drawLine(cx + s * 0.01f, cy - s * 0.38f, cx + s * 0.3f, cy - s * 0.2f, p)
+                }
+                5 -> {
+                    path.reset(); path.moveTo(cx, cy - s * 0.42f); path.lineTo(cx + s * 0.34f, cy - s * 0.25f); path.lineTo(cx + s * 0.3f, cy + s * 0.1f)
+                    path.lineTo(cx, cy + s * 0.42f); path.lineTo(cx - s * 0.3f, cy + s * 0.1f); path.lineTo(cx - s * 0.34f, cy - s * 0.25f); path.close(); c.drawPath(path, p)
+                }
+                else -> {
+                    c.drawCircle(cx, cy, s * 0.36f, p)
+                    rect.set(cx - s * 0.16f, cy - s * 0.36f, cx + s * 0.16f, cy + s * 0.36f); c.drawOval(rect, p)
+                    c.drawLine(cx - s * 0.36f, cy, cx + s * 0.36f, cy, p)
+                }
+            }
+        }
+    }
+ 
+    // ---------- medidor tipo cluster de auto ----------
+    private inner class ClusterView(ctx: Context) : View(ctx) {
+        private var a = 0f; private var b = 0f; private var d = 0f
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; color = Color.WHITE; typeface = Typeface.DEFAULT_BOLD }
+        private val rect = RectF()
+ 
+        private fun dial(c: Canvas, cx: Float, cy: Float, r: Float, v: Float, nums: Int, mx: Float) {
+            p.style = Paint.Style.FILL; p.color = 0xCC081428.toInt(); c.drawCircle(cx, cy, r, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = r * 0.06f; p.color = withAlpha(skin.accent, 0xDD)
+            rect.set(cx - r * 0.96f, cy - r * 0.96f, cx + r * 0.96f, cy + r * 0.96f); c.drawArc(rect, 0f, 360f, false, p)
+            p.color = 0xFFFF3B30.toInt(); p.strokeWidth = r * 0.07f
+            rect.set(cx - r * 0.84f, cy - r * 0.84f, cx + r * 0.84f, cy + r * 0.84f); c.drawArc(rect, 150f + 240f * 0.85f, 240f * 0.15f, false, p)
+            p.color = 0xCCFFFFFF.toInt(); p.strokeWidth = maxOf(2f, r * 0.02f)
+            for (i in 0..20) {
+                val ang = Math.toRadians(150.0 + 240.0 * i / 20); val len = if (i % 2 == 0) 0.16f else 0.09f
+                c.drawLine(cx + (r * 0.76f * Math.cos(ang)).toFloat(), cy + (r * 0.76f * Math.sin(ang)).toFloat(),
+                    cx + (r * (0.76f - len) * Math.cos(ang)).toFloat(), cy + (r * (0.76f - len) * Math.sin(ang)).toFloat(), p)
+            }
+            if (nums > 0) {
+                tp.textSize = r * 0.15f
+                for (i in 0..nums) {
+                    val ang = Math.toRadians(150.0 + 240.0 * i / nums)
+                    c.drawText("${(mx * i / nums).toInt()}", cx + (r * 0.5f * Math.cos(ang)).toFloat(), cy + (r * 0.5f * Math.sin(ang)).toFloat() + r * 0.05f, tp)
+                }
+            }
+            val na = Math.toRadians(150.0 + 240.0 * v)
+            p.color = 0xFFFF5A36.toInt(); p.strokeWidth = r * 0.05f; p.strokeCap = Paint.Cap.ROUND
+            c.drawLine(cx, cy, cx + (r * 0.8f * Math.cos(na)).toFloat(), cy + (r * 0.8f * Math.sin(na)).toFloat(), p)
+            p.style = Paint.Style.FILL; p.color = 0xFF05080F.toInt(); c.drawCircle(cx, cy, r * 0.13f, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = r * 0.03f; p.color = skin.accent; c.drawCircle(cx, cy, r * 0.13f, p)
+        }
+ 
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            val mx = if (stat.mbps > 100f) 500f else 100f
+            val side = if (stat.temp >= 0f) stat.temp / 100f else stat.disk
+            a = ease(a, stat.ram); b = ease(b, (stat.mbps / mx).coerceIn(0f, 1f)); d = ease(d, side)
+            dial(c, w * 0.17f, h * 0.44f, h * 0.27f, a, 0, 100f)
+            dial(c, w * 0.83f, h * 0.44f, h * 0.27f, d, 0, 100f)
+            dial(c, w / 2, h * 0.42f, h * 0.40f, b, 5, mx)
+            tp.textSize = dp(13).toFloat(); c.drawText("RAM ${(stat.ram * 100).toInt()}%", w * 0.17f, h * 0.93f, tp)
+            c.drawText(if (stat.temp >= 0f) "${stat.temp.toInt()}°C" else "DISCO ${(stat.disk * 100).toInt()}%", w * 0.83f, h * 0.93f, tp)
+            tp.textSize = dp(17).toFloat(); c.drawText("${"%.1f".format(stat.mbps)} Mbps", w / 2, h * 0.98f, tp)
+            if (Math.abs(a - stat.ram) > 0.004f || Math.abs(d - side) > 0.004f) postInvalidateOnAnimation()
+        }
+    }
+ 
+    // ---------- medidor de barras segmentadas (estilo deportivo) ----------
+    private inner class SegView(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val path = Path()
+        private val vals = FloatArray(4)
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat()
+            val t = floatArrayOf(stat.ram, stat.disk, if (stat.temp >= 0f) stat.temp / 100f else 0f, (stat.mbps / 100f).coerceIn(0f, 1f))
+            val names = arrayOf("RAM", "DISCO", "TEMP", "RED")
+            val txt = arrayOf("${(stat.ram * 100).toInt()}%", "${(stat.disk * 100).toInt()}%",
+                if (stat.temp >= 0f) "${stat.temp.toInt()}°" else "N/D", "${stat.mbps.toInt()} Mb")
+            var moving = false
+            for (i in 0 until 4) {
+                vals[i] = ease(vals[i], t[i]); if (Math.abs(vals[i] - t[i]) > 0.004f) moving = true
+                val y = dp(4) + i * dp(30).toFloat()
+                p.style = Paint.Style.FILL; p.typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC)
+                p.textSize = dp(12).toFloat(); p.textAlign = Paint.Align.LEFT; p.color = 0xFFD6D0E0.toInt()
+                c.drawText(names[i], 0f, y + dp(15), p)
+                segs(c, p, path, dp(52).toFloat(), y, w - dp(52 + 58).toFloat(), dp(20).toFloat(), vals[i], 20)
+                p.style = Paint.Style.FILL; p.textAlign = Paint.Align.RIGHT; p.textSize = dp(15).toFloat(); p.color = Color.WHITE
+                c.drawText(txt[i], w, y + dp(16), p)
+            }
+            if (moving) postInvalidateOnAnimation()
+        }
+    }
+ 
+    // ---------- barra larga deportiva ----------
+    private inner class SportBar(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val path = Path()
+        private var v = 0f
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            v = ease(v, stat.ram)
+            val x0 = dp(92).toFloat(); val x1 = w - dp(36 + 330)
+            p.style = Paint.Style.FILL; p.typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC)
+            p.textAlign = Paint.Align.CENTER; p.textSize = dp(11).toFloat()
+            for (i in 0..10) { p.color = if (i >= 9) 0xFFFF3B30.toInt() else 0xFFD6D0E0.toInt(); c.drawText("$i", x0 + (x1 - x0) * i / 10f, h * 0.36f, p) }
+            segs(c, p, path, x0, h * 0.44f, x1 - x0, h * 0.34f, v, 20)
+            p.style = Paint.Style.FILL; p.textAlign = Paint.Align.LEFT; p.textSize = dp(14).toFloat(); p.color = skin.accent
+            c.drawText("RAM", dp(36).toFloat(), h * 0.76f, p)
+            p.textSize = dp(26).toFloat(); p.color = Color.WHITE; c.drawText("${(stat.ram * 100).toInt()}%", x1 + dp(18), h * 0.8f, p)
+            p.textSize = dp(12).toFloat(); p.color = 0xFFD6D0E0.toInt()
+            val tt = if (stat.temp >= 0f) "${stat.temp.toInt()}°C" else "N/D"
+            c.drawText("DISCO ${(stat.disk * 100).toInt()}%   TEMP $tt   ↓ ${"%.1f".format(stat.mbps)} Mbps", x1 + dp(100), h * 0.72f, p)
+            if (Math.abs(v - stat.ram) > 0.004f) postInvalidateOnAnimation()
+        }
     }
  
     // ---------- piezas de interfaz ----------
@@ -614,8 +841,9 @@ class MainActivity : Activity() {
         val restApps = visible.filter { it.activityInfo.packageName !in favs }
         val s = scale
         val tileW = dp((168 * s).toInt()); val tileH = dp((124 * s).toInt())
-        ramG = null; diskG = null; netG = null; statusRow = null; weatherView = null
-        mediaBox = null; heroBox = null
+        ramG = null; diskG = null; netG = null; tempG = null; statusRow = null; weatherView = null
+        mediaBox = null; heroBox = null; clusterV = null; segV = null; sportV = null
+        sysInfo = null; wxBig = null; wxDesc2 = null; wxDetail = null; wxTom = null; indicators.clear()
  
         val root = FrameLayout(this).apply {
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(skin.top, skin.bottom))
@@ -648,6 +876,7 @@ class MainActivity : Activity() {
         }, gap())
         chips.addView(chip("Asistente") { assistantPanel() }, gap())
         chips.addView(chip("Personalizar") { customPanel() }, gap())
+        chips.addView(chip("Optimizar") { optimize() }, gap())
         bar.addView(HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(dp(4), dp(6), dp(4), dp(6)); addView(chips)
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
@@ -662,7 +891,24 @@ class MainActivity : Activity() {
             format24Hour = "HH:mm"; format12Hour = "h:mm a"; textSize = 26f; typeface = light()
             setTextColor(Color.WHITE); setShadowLayer(6f, 0f, 2f, Color.BLACK)
         })
+        val bs = prefs.getInt("bar", 0) % 3
+        if (bs >= 1) {
+            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            for (k in 0..6) {
+                val iv = IndicatorView(this, k); indicators.add(iv)
+                row.addView(iv, LinearLayout.LayoutParams(dp(28), dp(28)).apply { rightMargin = dp(8) })
+            }
+            bar.addView(row, 1, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(10); rightMargin = dp(14) })
+        }
+        if (bs == 1) bar.addView(TextClock(this).apply {
+            format24Hour = "ss"; format12Hour = "ss"; textSize = 15f; setTextColor(skin.accent)
+        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(4) })
         col.addView(bar, LinearLayout.LayoutParams(MATCH, WRAP))
+        if (bs == 2) {
+            sportV = SportBar(this)
+            col.addView(sportV, LinearLayout.LayoutParams(MATCH, dp(48)).apply { })
+            sportV!!.setBackgroundColor(0x77000000)
+        }
  
         // portada: título de cartelera a la izquierda, widgets a la derecha
         val hero = FrameLayout(this).apply { minimumHeight = (resources.displayMetrics.heightPixels * 0.40f).toInt() }
@@ -687,10 +933,15 @@ class MainActivity : Activity() {
         if (flag("wg_gauges") || flag("wg_status")) {
             val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(8)); background = dark(26) }
             if (flag("wg_gauges")) {
-                val g = LinearLayout(this)
-                ramG = gauge("RAM"); diskG = gauge("DISCO"); netG = gauge("RED")
-                listOf(ramG!!, diskG!!, netG!!).forEach { g.addView(it, LinearLayout.LayoutParams(dp(88), dp(88))) }
-                card.addView(g)
+                val gs = prefs.getInt("gstyle", 0) % 4
+                if (gs == 2) { clusterV = ClusterView(this); card.addView(clusterV, LinearLayout.LayoutParams(dp(300), dp(150))) }
+                else if (gs == 3) { segV = SegView(this); card.addView(segV, LinearLayout.LayoutParams(dp(300), dp(124))) }
+                else {
+                    val g = LinearLayout(this)
+                    ramG = gauge("RAM"); diskG = gauge("DISCO"); tempG = gauge("TEMP"); netG = gauge("RED")
+                    listOf(ramG!!, diskG!!, tempG!!, netG!!).forEach { g.addView(it, LinearLayout.LayoutParams(dp(78), dp(78))) }
+                    card.addView(g)
+                }
             }
             if (flag("wg_status")) {
                 statusRow = LinearLayout(this).apply { gravity = Gravity.CENTER_HORIZONTAL; setPadding(0, dp(2), 0, 0) }
@@ -706,6 +957,7 @@ class MainActivity : Activity() {
         content.addView(hero, LinearLayout.LayoutParams(MATCH, WRAP))
         val shelves = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(36), 0, dp(36), 0) }
         if (ws.isNotEmpty()) shelves.addView(shelf(if (prefs.getInt("wallmode", 0) == 1) "Cartelera" else "Mis fondos", hrow(thumbRow(ws))))
+        if (flag("wg_info")) shelves.addView(shelf("Información", hrow(infoRow())))
         if (favApps.isEmpty()) {
             shelves.addView(shelf("Favoritas", TextView(this).apply {
                 text = "Mantén pulsado OK sobre una app para fijarla aquí"
@@ -722,8 +974,10 @@ class MainActivity : Activity() {
         }
         shelves.addView(shelf("Todas las apps", hrow(grid)))
         content.addView(shelves, LinearLayout.LayoutParams(MATCH, WRAP))
-        content.alpha = 0f; content.translationY = dp(24).toFloat()
-        content.animate().alpha(1f).translationY(0f).setDuration(450).start()
+        if (!liteOn()) {
+            content.alpha = 0f; content.translationY = dp(24).toFloat()
+            content.animate().alpha(1f).translationY(0f).setDuration(450).start()
+        }
  
         col.addView(ScrollView(this).apply {
             isVerticalScrollBarEnabled = false; clipToPadding = false; setPadding(0, 0, 0, dp(56)); addView(content)
@@ -741,8 +995,67 @@ class MainActivity : Activity() {
         if (flag("wg_weather")) { lastWx = 0L; fetchWeather() }
     }
  
+    private fun infoRow(): View {
+        val r = LinearLayout(this)
+        fun card(): LinearLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(12), dp(18), dp(12)); background = dark(24) }
+        fun tv(sz: Float, col: Int): TextView = TextView(this).apply { textSize = sz; setTextColor(col); text = "—" }
+        val w = card()
+        w.addView(tv(12f, skin.accent).apply { text = "CLIMA AFUERA"; letterSpacing = 0.2f })
+        wxBig = tv(44f, Color.WHITE).apply { typeface = light() }
+        wxDesc2 = tv(16f, Color.WHITE); wxDetail = tv(13f, 0xFFD6D0E0.toInt()); wxTom = tv(13f, 0xFFD6D0E0.toInt())
+        w.addView(wxBig); w.addView(wxDesc2); w.addView(wxDetail); w.addView(wxTom)
+        r.addView(w, LinearLayout.LayoutParams(dp(330), WRAP).apply { rightMargin = dp(14) })
+        val sy = card()
+        sy.addView(tv(12f, skin.accent).apply { text = "SISTEMA DE LA TV"; letterSpacing = 0.2f })
+        sysInfo = tv(14f, Color.WHITE).apply { setPadding(0, dp(6), 0, dp(8)) }
+        sy.addView(sysInfo)
+        sy.addView(chip("Optimizar ahora") { optimize() })
+        r.addView(sy, LinearLayout.LayoutParams(dp(300), WRAP).apply { rightMargin = dp(14) })
+        return r
+    }
+ 
+    // libera RAM de apps en segundo plano sin tocar la música ni los servicios del sistema
+    private fun optimize() {
+        toast("Optimizando…")
+        Thread {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            fun avail(): Long { val mi = ActivityManager.MemoryInfo(); am.getMemoryInfo(mi); return mi.availMem }
+            val before = avail()
+            val keep = mutableSetOf(packageName, "android", "com.google.android.gms", "com.google.android.gsf",
+                "com.google.android.tvlauncher", "com.google.android.katniss", "com.google.android.apps.mediashell",
+                "com.android.systemui", "com.android.vending", "com.google.android.tts", "com.google.android.inputmethod.latin")
+            try {
+                (getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager)
+                    .getActiveSessions(ComponentName(this, MediaListener::class.java)).forEach { keep.add(it.packageName) }
+            } catch (e: Throwable) { }
+            var n = 0
+            for (ai in packageManager.getInstalledApplications(0)) {
+                val pkg = ai.packageName
+                if (pkg in keep || pkg.startsWith("com.mediatek") || pkg.startsWith("com.homwee") || pkg.startsWith("com.android.providers")
+                    || pkg.startsWith("com.android.bluetooth") || pkg.startsWith("com.android.settings") || pkg.startsWith("com.android.tv")) continue
+                try { am.killBackgroundProcesses(pkg); n++ } catch (e: Throwable) { }
+            }
+            Thread.sleep(1000)
+            val freed = ((avail() - before) / 1048576L).coerceAtLeast(0L)
+            runOnUiThread { toast("Listo: $n apps revisadas, ~$freed MB liberados. La música sigue sonando."); refreshStats() }
+        }.start()
+    }
+ 
+    private fun liteOn(): Boolean = prefs.getBoolean("lite", false)
+ 
+    private fun toggleLite() {
+        val on = !liteOn(); prefs.edit().putBoolean("lite", on).apply()
+        try {
+            val sc = if (on) "0.5" else "1.0"
+            for (k in listOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale"))
+                Settings.Global.putString(contentResolver, k, sc)
+        } catch (e: SecurityException) { }
+        build(); customPanel()
+    }
+ 
     // ---------- temporadas ----------
     private fun seasonFx(): Set<String> {
+        if (liteOn()) return emptySet()
         return when (prefs.getInt("season", 0) % 6) {
             1 -> emptySet()
             2 -> setOf("cobweb", "pumpkin")
@@ -1062,6 +1375,7 @@ class MainActivity : Activity() {
             toggle("wg_status", "Estado de entradas y Bluetooth"),
             toggle("wg_weather", "Clima"),
             toggle("wg_media", "Reproductor de música"),
+            toggle("wg_info", "Información (clima y sistema)"),
             Opt("Volver") { customPanel() }
         ))
     }
@@ -1204,7 +1518,8 @@ class MainActivity : Activity() {
         panel("Estilo", listOf(
             Opt("Tema de color: ${skin.name}") { prefs.edit().putInt("theme", prefs.getInt("theme", 0) + 1).apply(); build(); stylePanel() },
             Opt("Tarjetas: ${cardNames[prefs.getInt("cstyle", 0) % 3]}") { prefs.edit().putInt("cstyle", prefs.getInt("cstyle", 0) + 1).apply(); build(); stylePanel() },
-            Opt("Medidores: ${if (prefs.getInt("gstyle", 0) % 2 == 0) "Aguja" else "Anillo"}") { prefs.edit().putInt("gstyle", prefs.getInt("gstyle", 0) + 1).apply(); build(); stylePanel() },
+            Opt("Medidores: ${gNames[prefs.getInt("gstyle", 0) % 4]}") { prefs.edit().putInt("gstyle", prefs.getInt("gstyle", 0) + 1).apply(); build(); stylePanel() },
+            Opt("Barra superior: ${barNames[prefs.getInt("bar", 0) % 3]}") { prefs.edit().putInt("bar", prefs.getInt("bar", 0) + 1).apply(); build(); stylePanel() },
             Opt("Temporada: ${seasonNames[prefs.getInt("season", 0) % 6]}") { prefs.edit().putInt("season", prefs.getInt("season", 0) + 1).apply(); build(); stylePanel() },
             Opt("Tamaño de iconos: ${sizeNames[prefs.getInt("size", 1) % 3]}") { prefs.edit().putInt("size", prefs.getInt("size", 1) + 1).apply(); build(); stylePanel() },
             Opt("Volver") { customPanel() }
@@ -1216,6 +1531,8 @@ class MainActivity : Activity() {
             Opt("Estilo…") { stylePanel() },
             Opt("Fondos…") { wallPanel() },
             Opt("Widgets…") { widgetsPanel() },
+            Opt("Optimizar sistema ahora") { optimize() },
+            Opt("Modo ligero: ${onOff(liteOn())}") { toggleLite() },
             Opt("Sonidos de navegación: ${sndNames[sndMode()]}") {
                 prefs.edit().putInt("snd", (sndMode() + 1) % 4).apply(); loadSounds(); sfxReady = true; sfx(1); customPanel()
             },
@@ -1232,3 +1549,4 @@ class MainActivity : Activity() {
 }
  
 class MediaListener : android.service.notification.NotificationListenerService()
+ 
