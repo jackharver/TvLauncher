@@ -1,11 +1,14 @@
 package com.alejandro.tvlauncher
  
+import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.*
 import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ResolveInfo
 import android.graphics.*
@@ -32,6 +35,7 @@ import android.speech.tts.TextToSpeech
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.animation.LinearInterpolator
 import android.view.ViewGroup
 import android.widget.*
 import org.json.JSONArray
@@ -102,6 +106,18 @@ class MainActivity : Activity() {
     private var hudV: HudView? = null
     private var volView: VolumeView? = null
     private var wxIcon: WxIcon? = null
+    private var mediaProg: ProgView? = null
+    private var eqV: EqView? = null
+    private var mediaSpin: ObjectAnimator? = null
+    private var resumed = false
+    private var pendingSplash = false
+    private var wakeReceiver: BroadcastReceiver? = null
+    private val netHist = FloatArray(60)
+    private var sunrise = ""
+    private var sunset = ""
+    private var uvMax = -1.0
+    private var aqi = -1
+    private val mstyleNames = arrayOf("Tarjeta", "Vinilo", "Ecualizador", "Pastilla", "Portada")
     private var wxT: Int? = null
     private var wxFeels = 0
     private var wxHum = 0
@@ -167,11 +183,20 @@ class MainActivity : Activity() {
         prefs = getSharedPreferences("p", 0)
         if (!prefs.contains("fav")) putSet("fav", knownFavs)
         getExternalFilesDir("fondos")
+        wakeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, i: Intent?) {
+                if (flag("splash") && flag("splash_wake")) { if (resumed) replaySplash() else pendingSplash = true }
+            }
+        }
+        try { registerReceiver(wakeReceiver, IntentFilter(Intent.ACTION_SCREEN_ON)) } catch (e: Throwable) { }
         loadSounds()
         tts = TextToSpeech(this) { st -> if (st == TextToSpeech.SUCCESS) tts?.language = Locale("es", "MX") }
     }
  
-    override fun onDestroy() { tts?.shutdown(); sp?.release(); super.onDestroy() }
+    override fun onDestroy() {
+        try { wakeReceiver?.let { unregisterReceiver(it) } } catch (e: Throwable) { }
+        tts?.shutdown(); sp?.release(); super.onDestroy()
+    }
  
     override fun onResume() {
         super.onResume()
@@ -179,11 +204,14 @@ class MainActivity : Activity() {
         if (s != sig) { sig = s; build() }
         handler.removeCallbacks(tick); handler.post(tick)
         scheduleWall()
+        resumed = true
+        if (pendingSplash) { pendingSplash = false; replaySplash() }
         if (flag("wg_weather") && System.currentTimeMillis() - lastWx > 30 * 60_000L) fetchWeather()
     }
  
     override fun onPause() {
         super.onPause()
+        resumed = false
         handler.removeCallbacks(tick); handler.removeCallbacks(wallTask)
     }
  
@@ -307,7 +335,7 @@ class MainActivity : Activity() {
     private fun refreshCartelera() {
         val keyFile = File(getExternalFilesDir(null), "tmdb.txt")
         if (!keyFile.exists()) { toast("Falta tmdb.txt con tu clave (ver guía)"); return }
-        val key = keyFile.readText().trim()
+        val key = readLinesRobust(keyFile).firstOrNull() ?: ""
         toast("Descargando cartelera…")
         Thread {
             try {
@@ -350,13 +378,19 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val lat = prefs.getFloat("lat", 19.93f); val lon = prefs.getFloat("lon", -96.85f)
-                val root = JSONObject(httpGet("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code,relative_humidity_2m,apparent_temperature,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days=2&timezone=auto"))
+                val root = JSONObject(httpGet("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code,relative_humidity_2m,apparent_temperature,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset,uv_index_max&forecast_days=2&timezone=auto"))
                 val j = root.getJSONObject("current"); val d = root.getJSONObject("daily")
                 val t = Math.round(j.getDouble("temperature_2m"))
                 val desc = wxDesc(j.getInt("weather_code"))
                 val top = "$t° · $desc"
                 val detail = "Sensación ${Math.round(j.optDouble("apparent_temperature"))}° · Humedad ${j.optInt("relative_humidity_2m")}% · Viento ${Math.round(j.optDouble("wind_speed_10m"))} km/h"
                 val tom = "Mañana: ${Math.round(d.getJSONArray("temperature_2m_min").getDouble(1))}°–${Math.round(d.getJSONArray("temperature_2m_max").getDouble(1))}° · Lluvia ${d.getJSONArray("precipitation_probability_max").optInt(1)}%"
+                sunrise = d.getJSONArray("sunrise").optString(0).substringAfter('T', "")
+                sunset = d.getJSONArray("sunset").optString(0).substringAfter('T', "")
+                uvMax = d.getJSONArray("uv_index_max").optDouble(0, -1.0)
+                try {
+                    aqi = JSONObject(httpGet("https://air-quality-api.open-meteo.com/v1/air-quality?latitude=$lat&longitude=$lon&current=us_aqi")).getJSONObject("current").getInt("us_aqi")
+                } catch (e: Exception) { }
                 wxT = t.toInt(); wxDescS = desc; wxCode = j.getInt("weather_code")
                 wxFeels = Math.round(j.optDouble("apparent_temperature")).toInt(); wxHum = j.optInt("relative_humidity_2m")
                 runOnUiThread { renderWeather(); wxBig?.text = "$t°"; wxDesc2?.text = desc; wxDetail?.text = detail; wxTom?.text = tom }
@@ -547,6 +581,7 @@ class MainActivity : Activity() {
             stat.mbps = stat.mbps * 0.5f + m * 0.5f
         }
         lastRx = rx; lastRxT = t
+        System.arraycopy(netHist, 1, netHist, 0, netHist.size - 1); netHist[netHist.size - 1] = stat.mbps
         try {
             val l = (getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager).getActiveSessions(ComponentName(this, MediaListener::class.java))
             musicOn = l.any { it.playbackState?.state == PlaybackState.STATE_PLAYING }
@@ -840,6 +875,220 @@ class MainActivity : Activity() {
         return super.onKeyDown(keyCode, event)
     }
  
+    // ---------- widgets nuevos ----------
+    private fun opt(k: String): Boolean = prefs.getBoolean(k, false)
+ 
+    private fun toMin(t: String): Int {
+        val a = t.split(":")
+        return if (a.size == 2) (a[0].toIntOrNull() ?: 0) * 60 + (a[1].toIntOrNull() ?: 0) else -1
+    }
+ 
+    private fun aqiLabel(a: Int): String = when {
+        a < 0 -> "—"; a <= 50 -> "Bueno"; a <= 100 -> "Moderado"; a <= 150 -> "Dañino sensibles"; else -> "Malo"
+    }
+ 
+    private fun wordsTime(h24: Int, m: Int): Pair<String, String> {
+        val nums = arrayOf("doce", "una", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "once")
+        var h = h24 % 12; var mm = ((m + 2) / 5) * 5
+        if (mm == 60) { mm = 0; h = (h + 1) % 12 }
+        if (mm >= 35) h = (h + 1) % 12
+        val suf = when (mm) {
+            0 -> "en punto"; 5 -> "y cinco"; 10 -> "y diez"; 15 -> "y cuarto"; 20 -> "y veinte"; 25 -> "y veinticinco"; 30 -> "y media"
+            35 -> "menos veinticinco"; 40 -> "menos veinte"; 45 -> "menos cuarto"; 50 -> "menos diez"; else -> "menos cinco"
+        }
+        return Pair(if (h == 1) "Es la" else "Son las", "${nums[h]} $suf")
+    }
+ 
+    private inner class AnalogClock(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        override fun onMeasure(w: Int, h: Int) { setMeasuredDimension(dp(150), dp(150)) }
+        private fun hand(c: Canvas, cx: Float, deg: Float, len: Float, w: Float, col: Int) {
+            p.style = Paint.Style.STROKE; p.strokeCap = Paint.Cap.ROUND; p.strokeWidth = w; p.color = col
+            val a = Math.toRadians(deg - 90.0)
+            c.drawLine(cx, cx, cx + (len * Math.cos(a)).toFloat(), cx + (len * Math.sin(a)).toFloat(), p)
+        }
+        override fun onDraw(c: Canvas) {
+            val s = width.toFloat(); val cx = s / 2; val r = s / 2 - dp(6)
+            p.style = Paint.Style.FILL; p.color = 0xF2050508.toInt(); c.drawCircle(cx, cx, r, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = dp(3).toFloat(); p.color = skin.accent; c.drawCircle(cx, cx, r, p)
+            for (i in 0 until 60) {
+                val a = Math.toRadians(i * 6.0 - 90); val big = i % 5 == 0
+                val r1 = r - dp(4); val r2 = r - (if (big) dp(12) else dp(8))
+                p.strokeWidth = if (big) dp(2).toFloat() else dp(1).toFloat(); p.color = if (big) Color.WHITE else 0x66FFFFFF
+                c.drawLine(cx + (r1 * Math.cos(a)).toFloat(), cx + (r1 * Math.sin(a)).toFloat(), cx + (r2 * Math.cos(a)).toFloat(), cx + (r2 * Math.sin(a)).toFloat(), p)
+            }
+            val cal = Calendar.getInstance()
+            val sec = cal.get(Calendar.SECOND).toFloat(); val min = cal.get(Calendar.MINUTE) + sec / 60f; val hr = (cal.get(Calendar.HOUR) % 12) + min / 60f
+            hand(c, cx, hr * 30f, r * 0.5f, dp(5).toFloat(), Color.WHITE)
+            hand(c, cx, min * 6f, r * 0.75f, dp(3).toFloat(), Color.WHITE)
+            hand(c, cx, sec * 6f, r * 0.85f, dp(2).toFloat(), skin.accent)
+            p.style = Paint.Style.FILL; p.color = skin.accent; c.drawCircle(cx, cx, dp(5).toFloat(), p)
+            postInvalidateDelayed(1000)
+        }
+    }
+ 
+    private inner class WordClock(ctx: Context) : View(ctx) {
+        private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.LEFT }
+        override fun onMeasure(w: Int, h: Int) { setMeasuredDimension(dp(300), dp(96)) }
+        override fun onDraw(c: Canvas) {
+            val cal = Calendar.getInstance()
+            val pr = wordsTime(cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
+            tp.typeface = body(); tp.textSize = dp(15).toFloat(); tp.color = 0xFFB0A9BC.toInt(); c.drawText(pr.first, 0f, dp(18).toFloat(), tp)
+            tp.typeface = disp(); tp.color = Color.WHITE
+            var size = dp(30).toFloat(); tp.textSize = size
+            while (tp.measureText(pr.second) > width - dp(8) && size > dp(12)) { size -= 1f; tp.textSize = size }
+            c.drawText(pr.second, 0f, dp(62).toFloat(), tp)
+            tp.typeface = body(); tp.textSize = dp(12).toFloat(); tp.color = skin.accent
+            c.drawText(java.text.SimpleDateFormat("EEEE d 'de' MMMM", Locale("es")).format(cal.time), 0f, dp(88).toFloat(), tp)
+            postInvalidateDelayed(15000)
+        }
+    }
+ 
+    private inner class TimeProgress(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val path = Path()
+        override fun onMeasure(w: Int, h: Int) { setMeasuredDimension(dp(300), dp(124)) }
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val n = Calendar.getInstance()
+            val dayF = (n.get(Calendar.HOUR_OF_DAY) * 3600 + n.get(Calendar.MINUTE) * 60 + n.get(Calendar.SECOND)) / 86400f
+            val dow = (n.get(Calendar.DAY_OF_WEEK) + 5) % 7
+            val vals = floatArrayOf(dayF, (dow + dayF) / 7f,
+                (n.get(Calendar.DAY_OF_MONTH) - 1 + dayF) / n.getActualMaximum(Calendar.DAY_OF_MONTH),
+                (n.get(Calendar.DAY_OF_YEAR) - 1 + dayF) / n.getActualMaximum(Calendar.DAY_OF_YEAR))
+            val names = arrayOf("HOY", "SEMANA", "MES", "AÑO")
+            for (i in 0 until 4) {
+                val y = dp(4) + i * dp(30).toFloat()
+                p.style = Paint.Style.FILL; p.typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC)
+                p.textSize = dp(12).toFloat(); p.textAlign = Paint.Align.LEFT; p.color = 0xFFD6D0E0.toInt()
+                c.drawText(names[i], 0f, y + dp(15), p)
+                segs(c, p, path, dp(62).toFloat(), y, w - dp(62 + 56).toFloat(), dp(20).toFloat(), vals[i], 20)
+                p.style = Paint.Style.FILL; p.textAlign = Paint.Align.RIGHT; p.textSize = dp(15).toFloat(); p.color = Color.WHITE
+                c.drawText("${(vals[i] * 100).toInt()}%", w, y + dp(16), p)
+            }
+            postInvalidateDelayed(30000)
+        }
+    }
+ 
+    private inner class MonthView(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val tp = Paint(Paint.ANTI_ALIAS_FLAG)
+        override fun onMeasure(w: Int, h: Int) { setMeasuredDimension(dp(270), dp(196)) }
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            val cal = Calendar.getInstance(); val today = cal.get(Calendar.DAY_OF_MONTH)
+            val title = java.text.SimpleDateFormat("MMMM yyyy", Locale("es")).format(cal.time).replaceFirstChar { it.uppercase() }
+            tp.textAlign = Paint.Align.LEFT; tp.textSize = dp(15).toFloat(); tp.color = skin.accent; tp.typeface = Typeface.DEFAULT_BOLD
+            c.drawText(title, 0f, dp(15).toFloat(), tp)
+            val colW = w / 7; val rowH = (h - dp(24)) / 7
+            tp.textAlign = Paint.Align.CENTER; tp.textSize = dp(11).toFloat(); tp.typeface = body(); tp.color = 0xFFB0A9BC.toInt()
+            val names = arrayOf("L", "M", "X", "J", "V", "S", "D")
+            for (i in 0..6) c.drawText(names[i], colW * i + colW / 2, dp(24) + rowH * 0.72f, tp)
+            val first = (Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1) }.get(Calendar.DAY_OF_WEEK) + 5) % 7
+            for (d in 1..cal.getActualMaximum(Calendar.DAY_OF_MONTH)) {
+                val idx = first + d - 1; val col = idx % 7; val row = idx / 7 + 1
+                val cx = colW * col + colW / 2; val top = dp(24) + rowH * row
+                if (d == today) {
+                    p.style = Paint.Style.FILL; p.color = skin.accent; c.drawCircle(cx, top + rowH / 2, minOf(rowH, colW) * 0.46f, p)
+                    tp.color = 0xFF05050A.toInt()
+                } else tp.color = if (col >= 5) 0xFFB0A9BC.toInt() else Color.WHITE
+                c.drawText("$d", cx, top + rowH * 0.72f, tp)
+            }
+            postInvalidateDelayed(60000)
+        }
+    }
+ 
+    private inner class SkyView(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+        private val rect = RectF()
+        override fun onMeasure(w: Int, h: Int) { setMeasuredDimension(dp(300), dp(132)) }
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            val cx = w / 2; val cy = h * 0.72f; val r = minOf(w * 0.36f, h * 0.66f)
+            rect.set(cx - r, cy - r, cx + r, cy + r)
+            p.style = Paint.Style.STROKE; p.strokeCap = Paint.Cap.ROUND; p.strokeWidth = dp(3).toFloat(); p.color = 0x33FFFFFF
+            c.drawArc(rect, 180f, 180f, false, p); c.drawLine(cx - r - dp(12), cy, cx + r + dp(12), cy, p)
+            val sr = toMin(sunrise); val ss = toMin(sunset)
+            val n = Calendar.getInstance(); val nm = n.get(Calendar.HOUR_OF_DAY) * 60 + n.get(Calendar.MINUTE)
+            if (sr >= 0 && ss > sr) {
+                val f = ((nm - sr).toFloat() / (ss - sr)).coerceIn(0f, 1f)
+                p.color = skin.accent; c.drawArc(rect, 180f, 180f * f, false, p)
+                val a = Math.toRadians(180.0 + 180.0 * f)
+                p.style = Paint.Style.FILL; p.color = if (nm in sr..ss) 0xFFFFD84D.toInt() else 0xFF8896B3.toInt()
+                c.drawCircle(cx + (r * Math.cos(a)).toFloat(), cy + (r * Math.sin(a)).toFloat(), dp(8).toFloat(), p)
+            }
+            tp.typeface = Typeface.DEFAULT_BOLD; tp.textSize = dp(15).toFloat(); tp.color = Color.WHITE
+            c.drawText("UV ${if (uvMax >= 0) uvMax.toInt().toString() else "—"}", cx, cy - r * 0.42f, tp)
+            tp.typeface = body(); tp.textSize = dp(12).toFloat(); tp.color = 0xFFD6D0E0.toInt()
+            c.drawText("Aire ${if (aqi >= 0) aqi.toString() else "—"} ${aqiLabel(aqi)}", cx, cy - r * 0.1f, tp)
+            tp.textSize = dp(12).toFloat(); tp.color = skin.accent
+            tp.textAlign = Paint.Align.LEFT; c.drawText("Sale ${if (sunrise.isEmpty()) "—" else sunrise}", 0f, h - dp(4), tp)
+            tp.textAlign = Paint.Align.RIGHT; c.drawText("Se oculta ${if (sunset.isEmpty()) "—" else sunset}", w, h - dp(4), tp)
+            tp.textAlign = Paint.Align.CENTER
+            postInvalidateDelayed(30000)
+        }
+    }
+ 
+    private inner class NetGraph(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val path = Path()
+        override fun onMeasure(w: Int, h: Int) { setMeasuredDimension(dp(300), dp(112)) }
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat(); val top = dp(24).toFloat()
+            var mx = 10f; for (v in netHist) if (v > mx) mx = v
+            val n = netHist.size
+            path.reset()
+            for (i in 0 until n) {
+                val x = w * i / (n - 1); val y = h - (h - top) * (netHist[i] / mx) - dp(2)
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            val line = Path(path); path.lineTo(w, h); path.lineTo(0f, h); path.close()
+            p.style = Paint.Style.FILL; p.color = withAlpha(skin.accent, 0x33); c.drawPath(path, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = dp(2).toFloat(); p.strokeJoin = Paint.Join.ROUND; p.color = skin.accent; c.drawPath(line, p)
+            p.style = Paint.Style.FILL; p.typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC)
+            p.textAlign = Paint.Align.LEFT; p.textSize = dp(16).toFloat(); p.color = Color.WHITE
+            c.drawText("${"%.1f".format(stat.mbps)} Mbps", 0f, dp(16).toFloat(), p)
+            p.textAlign = Paint.Align.RIGHT; p.textSize = dp(12).toFloat(); p.color = 0xFFB0A9BC.toInt()
+            c.drawText("pico ${mx.toInt()}", w, dp(16).toFloat(), p)
+            postInvalidateDelayed(1000)
+        }
+    }
+ 
+    private fun widgetCard(title: String, v: View): LinearLayout {
+        val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(10), dp(16), dp(12)); background = dark(24) }
+        card.addView(TextView(this).apply {
+            text = title.uppercase(); textSize = 12f; letterSpacing = 0.2f; typeface = body(); setTextColor(skin.accent); setPadding(0, 0, 0, dp(6))
+        })
+        card.addView(v)
+        return card
+    }
+ 
+    private fun extraWidgets(): List<Triple<String, String, () -> View>> = listOf(
+        Triple("wg_aclock", "Reloj analógico", { AnalogClock(this) }),
+        Triple("wg_words", "Reloj en palabras", { WordClock(this) }),
+        Triple("wg_cal", "Calendario", { MonthView(this) }),
+        Triple("wg_sky", "Sol y aire", { SkyView(this) }),
+        Triple("wg_netg", "Tráfico de red", { NetGraph(this) }),
+        Triple("wg_tprog", "Progreso del tiempo", { TimeProgress(this) })
+    )
+ 
+    private fun panelsOverlay() {
+        val d = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
+        val wrap = FrameLayout(this).apply { setBackgroundColor(0xEB080810.toInt()) }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(44), dp(24), dp(44), dp(14)) }
+        val head = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, dp(10)) }
+        head.addView(TextView(this).apply { text = "PANELES"; textSize = 22f; letterSpacing = 0.2f; typeface = disp(); setTextColor(skin.accent) },
+            LinearLayout.LayoutParams(0, WRAP, 1f))
+        val close = chip("Cerrar") { d.dismiss() }
+        head.addView(close)
+        col.addView(head)
+        val grid = GridLayout(this).apply { columnCount = 2 }
+        for (e in extraWidgets()) grid.addView(widgetCard(e.second, e.third()), GridLayout.LayoutParams().apply { setMargins(dp(8), dp(8), dp(8), dp(8)) })
+        col.addView(ScrollView(this).apply { isVerticalScrollBarEnabled = false; isFocusable = true; addView(grid) })
+        wrap.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
+        d.setContentView(wrap); d.window?.setLayout(MATCH, MATCH); d.show(); close.requestFocus()
+    }
+ 
     // ---------- barra larga deportiva ----------
     private inner class SportBar(ctx: Context) : View(ctx) {
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -1013,7 +1262,7 @@ class MainActivity : Activity() {
         return r
     }
  
-    private fun mediaCard(): LinearLayout {
+    private fun mediaClassic(): LinearLayout {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(10), dp(12), dp(10))
             background = dark(26); minimumWidth = dp(280); visibility = View.GONE
@@ -1036,7 +1285,9 @@ class MainActivity : Activity() {
         txt.addView(ti); txt.addView(ar)
         top.addView(txt, LinearLayout.LayoutParams(0, WRAP, 1f))
         card.addView(top)
-        val ctl = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0) }
+        val pg = ProgView(this); mediaProg = pg
+        card.addView(pg, LinearLayout.LayoutParams(MATCH, dp(22)).apply { topMargin = dp(6) })
+        val ctl = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0) }
         fun g() = LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6); rightMargin = dp(6) }
         ctl.addView(chip("|<") { ctrl?.transportControls?.skipToPrevious() }, g())
         val pl = chip("||") { togglePlay() }
@@ -1045,6 +1296,160 @@ class MainActivity : Activity() {
         card.addView(ctl)
         mediaBox = card; mediaCtl = ctl; mediaArt = art; mediaTitle = ti; mediaArtist = ar; mediaPlay = pl as TextView
         return card
+    }
+ 
+    private fun fmt(ms: Long): String { val t = (ms / 1000).coerceAtLeast(0); return "${t / 60}:${"%02d".format(t % 60)}" }
+ 
+    private inner class ProgView(ctx: Context) : View(ctx) {
+        private var pos = 0L
+        private var dur = 0L
+        private var playing = false
+        private var t0 = 0L
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        fun set(pos: Long, dur: Long, playing: Boolean) {
+            this.pos = pos; this.dur = dur; this.playing = playing; t0 = SystemClock.elapsedRealtime(); invalidate()
+        }
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat(); val cy = h * 0.35f
+            val cur = if (playing) pos + (SystemClock.elapsedRealtime() - t0) else pos
+            val f = if (dur > 0) (cur.toFloat() / dur).coerceIn(0f, 1f) else 0f
+            p.strokeCap = Paint.Cap.ROUND; p.style = Paint.Style.STROKE; p.strokeWidth = dp(4).toFloat()
+            p.color = 0x33FFFFFF; c.drawLine(dp(2).toFloat(), cy, w - dp(2), cy, p)
+            p.color = skin.accent; c.drawLine(dp(2).toFloat(), cy, dp(2) + (w - dp(4)) * f, cy, p)
+            p.style = Paint.Style.FILL; p.textSize = dp(10).toFloat(); p.color = 0xFFB0A9BC.toInt()
+            p.textAlign = Paint.Align.LEFT; c.drawText(fmt(cur), 0f, h - dp(1), p)
+            p.textAlign = Paint.Align.RIGHT; c.drawText(if (dur > 0) fmt(dur) else "--:--", w, h - dp(1), p)
+            if (playing) postInvalidateDelayed(1000)
+        }
+    }
+ 
+    private inner class EqView(ctx: Context) : View(ctx) {
+        var playing = false
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val rect = RectF()
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat(); val n = 16
+            val t = SystemClock.elapsedRealtime() / 1000.0
+            val gap = dp(3).toFloat(); val bw = (w - gap * (n - 1)) / n
+            p.style = Paint.Style.FILL
+            for (i in 0 until n) {
+                val a = if (playing) 0.2f + 0.8f * Math.abs(Math.sin(t * (2.2 + (i % 5) * 0.7) + i * 1.3)).toFloat() else 0.12f
+                val x = i * (bw + gap)
+                p.color = if (a > 0.9f) 0xFFFF3B30.toInt() else skin.accent
+                rect.set(x, h - h * a, x + bw, h); c.drawRoundRect(rect, bw / 2, bw / 2, p)
+            }
+            if (playing) postInvalidateDelayed(60)
+        }
+    }
+ 
+    private fun baseMediaCard(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(10), dp(12), dp(10))
+        background = dark(26); minimumWidth = dp(280); visibility = View.GONE
+    }
+ 
+    private fun txtCol(titleSize: Float): LinearLayout {
+        val ti = TextView(this).apply {
+            textSize = titleSize; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE); maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END; maxWidth = dp(190)
+        }
+        val ar = TextView(this).apply {
+            textSize = 13f; setTextColor(0xFFD6D0E0.toInt()); maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END; maxWidth = dp(190)
+        }
+        mediaTitle = ti; mediaArtist = ar
+        return LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(ti); addView(ar) }
+    }
+ 
+    private fun ctlRow(compact: Boolean): LinearLayout {
+        val ctl = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) }
+        fun g() = LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6); rightMargin = dp(6) }
+        if (!compact) ctl.addView(chip("|<") { ctrl?.transportControls?.skipToPrevious() }, g())
+        val pl = chip("||") { togglePlay() }
+        ctl.addView(pl, g()); mediaPlay = pl as TextView
+        ctl.addView(chip(">|") { ctrl?.transportControls?.skipToNext() }, g())
+        mediaCtl = ctl
+        return ctl
+    }
+ 
+    private fun oval(color: Int): GradientDrawable = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(color) }
+ 
+    private fun mediaVinyl(): LinearLayout {
+        val card = baseMediaCard(); mediaBox = card
+        val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        val disc = FrameLayout(this)
+        val art = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true; background = oval(0xFF222222.toInt()) }
+        disc.addView(art, FrameLayout.LayoutParams(MATCH, MATCH))
+        disc.addView(View(this).apply { background = oval(0xFF0D0C14.toInt()).apply { setStroke(dp(2), skin.accent) } },
+            FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
+        mediaArt = art
+        mediaSpin = ObjectAnimator.ofFloat(disc, "rotation", 0f, 360f).apply {
+            duration = 7000; interpolator = LinearInterpolator(); repeatCount = ValueAnimator.INFINITE
+        }
+        row.addView(disc, LinearLayout.LayoutParams(dp(92), dp(92)))
+        val col = txtCol(17f); col.setPadding(dp(14), 0, 0, 0)
+        val pg = ProgView(this); mediaProg = pg
+        col.addView(pg, LinearLayout.LayoutParams(dp(170), dp(22)).apply { topMargin = dp(6) })
+        row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+        card.addView(row); card.addView(ctlRow(false))
+        return card
+    }
+ 
+    private fun mediaEq(): LinearLayout {
+        val card = baseMediaCard(); mediaBox = card
+        val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        val art = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(0x33FFFFFF) }
+        }
+        mediaArt = art
+        top.addView(art, LinearLayout.LayoutParams(dp(54), dp(54)))
+        val col = txtCol(16f); col.setPadding(dp(12), 0, 0, 0)
+        top.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+        card.addView(top)
+        val eq = EqView(this); eqV = eq
+        card.addView(eq, LinearLayout.LayoutParams(MATCH, dp(38)).apply { topMargin = dp(8) })
+        card.addView(ctlRow(false))
+        return card
+    }
+ 
+    private fun mediaPill(): LinearLayout {
+        val card = baseMediaCard(); mediaBox = card
+        card.orientation = LinearLayout.HORIZONTAL; card.gravity = Gravity.CENTER_VERTICAL
+        card.setPadding(dp(10), dp(8), dp(10), dp(8)); card.background = dark(34)
+        val art = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true; background = oval(0xFF222222.toInt()) }
+        mediaArt = art
+        card.addView(art, LinearLayout.LayoutParams(dp(44), dp(44)))
+        val col = txtCol(15f); col.setPadding(dp(10), 0, dp(8), 0)
+        card.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val ctl = ctlRow(true); ctl.setPadding(0, 0, 0, 0)
+        card.addView(ctl)
+        return card
+    }
+ 
+    private fun mediaCover(): LinearLayout {
+        val card = baseMediaCard(); mediaBox = card
+        card.setPadding(0, 0, 0, dp(8)); card.clipToOutline = true
+        val f = FrameLayout(this)
+        val art = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(0xFF1A1826.toInt()) }
+        mediaArt = art
+        f.addView(art, FrameLayout.LayoutParams(MATCH, MATCH))
+        f.addView(View(this).apply { background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x00000000, 0xEE000000.toInt())) },
+            FrameLayout.LayoutParams(MATCH, MATCH))
+        val col = txtCol(22f); col.setPadding(dp(14), 0, dp(14), dp(26))
+        mediaTitle?.maxWidth = dp(260); mediaArtist?.maxWidth = dp(260)
+        f.addView(col, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START))
+        val pg = ProgView(this); mediaProg = pg
+        f.addView(pg, FrameLayout.LayoutParams(MATCH, dp(22), Gravity.BOTTOM).apply { setMargins(dp(14), 0, dp(14), dp(2)) })
+        card.addView(f, LinearLayout.LayoutParams(MATCH, dp(170)))
+        card.addView(ctlRow(false))
+        return card
+    }
+ 
+    private fun mediaCard(): LinearLayout {
+        mediaProg = null; eqV = null; mediaSpin?.cancel(); mediaSpin = null
+        return when (prefs.getInt("mstyle", 0) % 5) {
+            1 -> mediaVinyl(); 2 -> mediaEq(); 3 -> mediaPill(); 4 -> mediaCover(); else -> mediaClassic()
+        }
     }
  
     private fun togglePlay() {
@@ -1068,6 +1473,16 @@ class MainActivity : Activity() {
             if (art != null) mediaArt?.setImageBitmap(art)
             else try { mediaArt?.setImageDrawable(packageManager.getApplicationIcon(c.packageName)) } catch (e: Exception) { }
             mediaPlay?.text = if (c.playbackState?.state == PlaybackState.STATE_PLAYING) "||" else ">"
+            val stt = c.playbackState; val playingNow = stt?.state == PlaybackState.STATE_PLAYING
+            var pos = stt?.position ?: 0L
+            if (playingNow && stt != null) pos += ((SystemClock.elapsedRealtime() - stt.lastPositionUpdateTime) * stt.playbackSpeed).toLong()
+            mediaProg?.set(pos, md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L, playingNow)
+            eqV?.let { it.playing = playingNow; it.invalidate() }
+            val sa = mediaSpin
+            if (sa != null) {
+                if (playingNow) { if (!sa.isStarted) sa.start() else if (sa.isPaused) sa.resume() }
+                else if (sa.isRunning) sa.pause()
+            }
             mediaCtl?.visibility = View.VISIBLE
             box.visibility = View.VISIBLE
         } catch (e: SecurityException) {
@@ -1118,6 +1533,7 @@ class MainActivity : Activity() {
             if (ok == null) toast("No disponible en esta TV")
         }, gap())
         chips.addView(chip("Asistente") { assistantPanel() }, gap())
+        chips.addView(chip("Paneles") { panelsOverlay() }, gap())
         chips.addView(chip("Personalizar") { customPanel() }, gap())
         chips.addView(chip("Optimizar") { optimize() }, gap())
         bar.addView(HorizontalScrollView(this).apply {
@@ -1255,6 +1671,7 @@ class MainActivity : Activity() {
         sy.addView(sysInfo)
         sy.addView(chip("Optimizar ahora") { optimize() })
         r.addView(sy, LinearLayout.LayoutParams(dp(300), WRAP).apply { rightMargin = dp(14) })
+        for (e in extraWidgets()) if (opt(e.first)) r.addView(widgetCard(e.second, e.third()), LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(14) })
         return r
     }
  
@@ -1398,6 +1815,7 @@ class MainActivity : Activity() {
         val root = baseRoot(intArrayOf(0x44000000, 0x00000000, 0xCC000000.toInt()))
  
         val tl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        tl.addView(TextView(this).apply { text = greetingText(); textSize = 18f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK) })
         tl.addView(TextClock(this).apply {
             format24Hour = "HH:mm"; format12Hour = "h:mm"; textSize = 76f; typeface = disp(); setTextColor(Color.WHITE); setShadowLayer(12f, 0f, 3f, Color.BLACK)
         })
@@ -1420,6 +1838,7 @@ class MainActivity : Activity() {
             if (ok == null) toast("No disponible en esta TV")
         }, gap())
         chips.addView(chip("Asistente") { assistantPanel() }, gap())
+        chips.addView(chip("Paneles") { panelsOverlay() }, gap())
         chips.addView(chip("Fondo") { nextWall() }, gap())
         chips.addView(chip("Optimizar") { optimize() }, gap())
         chips.addView(chip("Personalizar") { customPanel() }, gap())
@@ -1673,13 +2092,15 @@ class MainActivity : Activity() {
     }
  
     // ---------- asistente (Claude) ----------
-    private fun claudeKey(): String? =
-        File(getExternalFilesDir(null), "claude.txt").takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
+    private fun claudeKey(): String? {
+        val f = File(getExternalFilesDir(null), "claude.txt")
+        return if (f.exists()) readLinesRobust(f).firstOrNull() else null
+    }
  
     private fun gptConf(): Pair<String, String>? {
         val f = File(getExternalFilesDir(null), "openai.txt")
         if (!f.exists()) return null
-        val lines = f.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+        val lines = readLinesRobust(f)
         if (lines.isEmpty()) return null
         return Pair(lines[0], if (lines.size > 1) lines[1] else "gpt-4o-mini")
     }
@@ -1784,6 +2205,9 @@ class MainActivity : Activity() {
     // ---------- personalización ----------
     private fun onOff(b: Boolean): String = if (b) "Sí" else "No"
  
+    private fun toggleOff(key: String, label: String): Opt =
+        Opt("$label: ${onOff(opt(key))}") { prefs.edit().putBoolean(key, !opt(key)).apply(); build(); widgetsPanel() }
+ 
     private fun toggle(key: String, label: String): Opt =
         Opt("$label: ${onOff(flag(key))}") { prefs.edit().putBoolean(key, !flag(key)).apply(); build(); widgetsPanel() }
  
@@ -1794,7 +2218,13 @@ class MainActivity : Activity() {
             toggle("wg_weather", "Clima"),
             toggle("wg_media", "Reproductor de música"),
             toggle("wg_hud", "Etiquetas rápidas (RAM 76%)"),
-            toggle("wg_info", "Información (clima y sistema)"),
+            toggle("wg_info", "Fila de información (clima y sistema)"),
+            toggleOff("wg_aclock", "  Reloj analógico"),
+            toggleOff("wg_words", "  Reloj en palabras"),
+            toggleOff("wg_cal", "  Calendario"),
+            toggleOff("wg_sky", "  Sol y aire"),
+            toggleOff("wg_netg", "  Tráfico de red"),
+            toggleOff("wg_tprog", "  Progreso del tiempo"),
             Opt("Volver") { customPanel() }
         ))
     }
@@ -1819,6 +2249,47 @@ class MainActivity : Activity() {
             Opt("Actualizar cartelera") { refreshCartelera() },
             Opt("Volver") { customPanel() }
         ), "Mis imágenes: ${userFiles().size} en la carpeta. Cartelera: datos de TMDB (no certificado por TMDB).")
+    }
+ 
+    // ---------- archivos de texto y nombre ----------
+    private fun readTextRobust(f: File): String {
+        val b = f.readBytes()
+        val cs = when {
+            b.size >= 2 && b[0] == 0xFF.toByte() && b[1] == 0xFE.toByte() -> Charsets.UTF_16LE
+            b.size >= 2 && b[0] == 0xFE.toByte() && b[1] == 0xFF.toByte() -> Charsets.UTF_16BE
+            else -> Charsets.UTF_8
+        }
+        return String(b, cs).replace("\uFEFF", "").replace("\u0000", "")
+    }
+ 
+    private fun readLinesRobust(f: File): List<String> = try {
+        readTextRobust(f).lines().map { it.trim() }.filter { it.isNotEmpty() }
+    } catch (e: Throwable) { emptyList() }
+ 
+    private fun userName(): String {
+        val saved = prefs.getString("uname", "") ?: ""
+        if (saved.isNotBlank()) return saved.trim()
+        val f = File(getExternalFilesDir(null), "nombre.txt")
+        return if (f.exists()) (readLinesRobust(f).firstOrNull() ?: "") else ""
+    }
+ 
+    private fun greetingText(): String {
+        val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val hi = if (h < 12) "Buenos días" else if (h < 19) "Buenas tardes" else "Buenas noches"
+        val nm = userName()
+        return if (nm.isEmpty()) hi else "$hi, $nm"
+    }
+ 
+    private fun askName() {
+        val et = EditText(this).apply { setText(userName()); hint = "Tu nombre"; isSingleLine = true }
+        AlertDialog.Builder(this).setTitle("¿Cómo te llamas?").setView(et)
+            .setPositiveButton("Guardar") { _, _ -> prefs.edit().putString("uname", et.text.toString().trim()).apply(); customPanel() }
+            .setNegativeButton("Cancelar", null).show()
+    }
+ 
+    private fun replaySplash() {
+        val content = findViewById<ViewGroup>(android.R.id.content) ?: return
+        content.addView(splashView(), FrameLayout.LayoutParams(MATCH, MATCH))
     }
  
     // ---------- sonidos ----------
@@ -1899,7 +2370,7 @@ class MainActivity : Activity() {
         }
         val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
         val hi = if (h < 12) "Buenos días" else if (h < 19) "Buenas tardes" else "Buenas noches"
-        val nm = File(getExternalFilesDir(null), "nombre.txt").takeIf { it.exists() }?.readText()?.trim().orEmpty()
+        val nm = userName()
         col.addView(TextView(this).apply {
             text = if (nm.isEmpty()) hi else "$hi, $nm"; textSize = 58f; typeface = light()
             setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, dp(22), 0, dp(6))
@@ -1956,6 +2427,7 @@ class MainActivity : Activity() {
             Opt("Reloj: ${clkNames[prefs.getInt("clk", 0) % 5]}") { prefs.edit().putInt("clk", prefs.getInt("clk", 0) + 1).apply(); build(); barPanel() },
             Opt("Clima en la barra: ${wxsNames[prefs.getInt("wxs", 0) % 4]}") { prefs.edit().putInt("wxs", prefs.getInt("wxs", 0) + 1).apply(); build(); barPanel() },
             Opt("Medidores: ${gNames[prefs.getInt("gstyle", 0) % 5]}") { prefs.edit().putInt("gstyle", prefs.getInt("gstyle", 0) + 1).apply(); build(); barPanel() },
+            Opt("Reproductor de música: ${mstyleNames[prefs.getInt("mstyle", 0) % 5]}") { prefs.edit().putInt("mstyle", prefs.getInt("mstyle", 0) + 1).apply(); build(); barPanel() },
             Opt("Widgets…") { widgetsPanel() },
             Opt("Volver") { stylePanel() }
         ))
@@ -1974,7 +2446,10 @@ class MainActivity : Activity() {
             Opt("Volumen de sonidos: ${volNames[prefs.getInt("sndvol", 1) % 3]}") {
                 prefs.edit().putInt("sndvol", prefs.getInt("sndvol", 1) + 1).apply(); sfx(1); customPanel()
             },
+            Opt("Tu nombre: ${userName().ifEmpty { "sin definir" }}") { askName() },
             toggle("splash", "Pantalla de bienvenida"),
+            toggle("splash_wake", "Bienvenida al despertar la TV"),
+            Opt("Probar bienvenida") { replaySplash() },
             toggle("volbar", "Barra de volumen neón"),
             Opt("Probar barra de volumen") { showVolume() },
             toggle("tts", "Voz del asistente"),
