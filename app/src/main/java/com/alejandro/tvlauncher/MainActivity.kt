@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.content.pm.ResolveInfo
 import android.graphics.*
 import android.graphics.drawable.BitmapDrawable
@@ -104,7 +105,7 @@ class MainActivity : Activity() {
     private val fontNames = arrayOf("Moderna", "Tecnológica", "Consola", "Elegante", "Casual")
     private val clkNames = arrayOf("Delgado", "Neón", "Doble línea", "Tecnológico", "Minimal")
     private val wxsNames = arrayOf("Texto", "Icono", "Detalle", "Oculto")
-    private val layoutNames = arrayOf("Cine", "Aurora Dock", "Mosaico")
+    private val layoutNames = arrayOf("Cine", "Aurora Dock", "Horizonte")
     private val menuNames = arrayOf("Lista", "Juego")
     private var menuRefresh: (() -> Unit)? = null
     private val patCache = HashMap<Int, Bitmap>()
@@ -113,6 +114,7 @@ class MainActivity : Activity() {
     private var volView: VolumeView? = null
     private var wxIcon: WxIcon? = null
     private var heroSyn: TextView? = null
+    private var idleBox: View? = null
     private var miniV: MiniDials? = null
     private var tickerView: TextView? = null
     private var tickerItems: List<String> = emptyList()
@@ -342,8 +344,8 @@ class MainActivity : Activity() {
                 heroBtn?.text = "Ver en ${w.prov}"; heroBtn?.visibility = View.VISIBLE
                 captionAction = { goPkg(p) }
             } else heroBtn?.visibility = View.GONE
-            box.visibility = View.VISIBLE
-        } else box.visibility = View.GONE
+            box.visibility = View.VISIBLE; idleBox?.visibility = View.GONE
+        } else { box.visibility = View.GONE; idleBox?.visibility = View.VISIBLE }
     }
  
     private fun nextWall() {
@@ -1608,7 +1610,7 @@ class MainActivity : Activity() {
     private fun build() {
         when (prefs.getInt("layout", 0) % 3) {
             1 -> buildDock()
-            2 -> buildMosaic()
+            2 -> buildHorizon()
             else -> buildCine()
         }
     }
@@ -1617,7 +1619,7 @@ class MainActivity : Activity() {
         ramG = null; diskG = null; netG = null; tempG = null; statusRow = null; weatherView = null
         mediaBox = null; heroBox = null; clusterV = null; segV = null; sportV = null; orbV = null; wxIcon = null
         sysInfo = null; wxBig = null; wxDesc2 = null; wxDetail = null; wxTom = null; indicators.clear()
-        miniV = null; tickerView = null; heroSyn = null
+        miniV = null; tickerView = null; heroSyn = null; idleBox = null
         carouselTask?.let { handler.removeCallbacks(it) }; carouselTask = null
     }
  
@@ -2488,57 +2490,109 @@ class MainActivity : Activity() {
         }
     }
  
-    private fun miniTile(ri: ResolveInfo): View {
-        val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(packageManager).toString()
-        val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(4), dp(6), dp(4), dp(4)) }
-        val iv = ImageView(this).apply { setImageDrawable(ri.loadIcon(packageManager)) }
-        v.addView(iv, LinearLayout.LayoutParams(dp(40), dp(40)))
-        v.addView(TextView(this).apply {
-            text = label; textSize = 10f; typeface = body(); setTextColor(Color.WHITE); maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END; gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
-        })
-        return focusable(v, 18, { goPkg(pkg) }, { appMenu(pkg, label) }, iv, 1.15f)
+    // ---------- diseño Horizonte: pestañas por categoría y una sola fila de apps ----------
+    private fun categoryOf(ri: ResolveInfo): String {
+        val pkg = ri.activityInfo.packageName.lowercase()
+        val cat = try { ri.activityInfo.applicationInfo.category } catch (e: Throwable) { -1 }
+        val music = listOf("spotify", "music", "deezer", "tidal", "soundcloud", "pandora", "radio")
+        val video = listOf("netflix", "youtube.tv", "amazonvideo", "disney", "wbd", "hbo", "hulu", "tubi", "paramount", "crunchyroll",
+            "univision", "prendetv", "vix", "plex", "kodi", "twitch", "appletv", "atve", "peacock", "starz", "pluto")
+        return when {
+            cat == ApplicationInfo.CATEGORY_GAME || pkg.contains("game") -> "Juegos"
+            cat == ApplicationInfo.CATEGORY_AUDIO || music.any { pkg.contains(it) } -> "Música"
+            cat == ApplicationInfo.CATEGORY_VIDEO || video.any { pkg.contains(it) } -> "Video"
+            else -> "Utilidades"
+        }
     }
  
-    // diseño Mosaico: panel de apps a la izquierda, portada debajo y widgets a la derecha
-    private fun buildMosaic() {
+    private fun horizonCard(ri: ResolveInfo): View {
+        val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(packageManager).toString()
+        val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(6), dp(8), dp(6), dp(6)) }
+        val iv = ImageView(this).apply { setImageDrawable(ri.loadIcon(packageManager)) }
+        val sz = dp((50 * scale).toInt())
+        v.addView(iv, LinearLayout.LayoutParams(sz, sz))
+        v.addView(TextView(this).apply {
+            text = label; textSize = 11f; typeface = body(); setTextColor(Color.WHITE); maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END; gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0)
+        })
+        return focusable(v, 22, { goPkg(pkg) }, { appMenu(pkg, label) }, iv, 1.18f)
+    }
+ 
+    private fun buildHorizon() {
         val hidden = getSet("hidden"); val favs = getSet("fav")
         val visible = apps().filter { it.activityInfo.packageName !in hidden }
-        val ordered = visible.filter { it.activityInfo.packageName in favs } + visible.filter { it.activityInfo.packageName !in favs }
+        val s = scale
         resetRefs()
-        val root = baseRoot(intArrayOf(0x55000000, 0x22000000, 0xDD000000.toInt()))
+        val cats = listOf(
+            Pair("Favoritas", visible.filter { it.activityInfo.packageName in favs }),
+            Pair("Video", visible.filter { categoryOf(it) == "Video" }),
+            Pair("Música", visible.filter { categoryOf(it) == "Música" }),
+            Pair("Juegos", visible.filter { categoryOf(it) == "Juegos" }),
+            Pair("Utilidades", visible.filter { categoryOf(it) == "Utilidades" }),
+            Pair("Todas", visible)
+        ).filter { it.first == "Favoritas" || it.first == "Todas" || it.second.isNotEmpty() }
+        var cur = prefs.getInt("htab", 0).coerceIn(0, cats.size - 1)
+ 
+        val root = baseRoot(intArrayOf(0x44000000, 0x00000000, 0xE0000000.toInt()))
         val railOn = prefs.getInt("btnpos", 0) % 2 == 1
         val content = FrameLayout(this).apply { setPadding(if (railOn) dp(54) else 0, 0, 0, 0) }
         content.addView(topBar(true), FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
  
-        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(10), dp(14), dp(10)); background = dark(26) }
-        panel.addView(TextView(this).apply {
-            text = "APPS"; textSize = 12f; letterSpacing = 0.25f; typeface = body(); setTextColor(skin.accent); setPadding(dp(4), 0, 0, dp(4))
+        // zona central: bienvenida (sin portada) o portada con sinopsis
+        val idle = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(32), 0, dp(20), 0) }
+        idle.addView(TextView(this).apply {
+            text = greetingText(); textSize = 34f; typeface = disp(); setTextColor(Color.WHITE); setShadowLayer(10f, 0f, 3f, Color.BLACK)
         })
-        val grid = GridLayout(this).apply { columnCount = 6 }
-        var first: View? = null
-        ordered.take(11).forEach {
-            val t = miniTile(it); if (first == null) first = t
-            grid.addView(t, GridLayout.LayoutParams().apply { width = dp(80); height = dp(74); setMargins(dp(3), dp(3), dp(3), dp(3)) })
-        }
-        val gi = GridIcon(this)
-        val all = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(4), dp(6), dp(4), dp(4)) }
-        all.addView(gi, LinearLayout.LayoutParams(dp(36), dp(36)))
-        all.addView(TextView(this).apply { text = "Todas"; textSize = 10f; typeface = body(); setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
-        val allBtn = focusable(all, 18, { drawer() }, null, gi, 1.15f)
-        if (first == null) first = allBtn
-        grid.addView(allBtn, GridLayout.LayoutParams().apply { width = dp(80); height = dp(74); setMargins(dp(3), dp(3), dp(3), dp(3)) })
-        panel.addView(grid)
-        left.addView(panel, LinearLayout.LayoutParams(WRAP, WRAP))
-        left.addView(makeHero(), LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(12) })
-        content.addView(left, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START).apply { setMargins(dp(24), dp(92), 0, 0) })
+        idle.addView(TextClock(this).apply {
+            format24Hour = "EEEE d 'de' MMMM"; format12Hour = "EEEE d 'de' MMMM"; textSize = 18f; typeface = body(); setTextColor(0xFFE6E0F0.toInt())
+        })
+        idle.addView(TextView(this).apply { text = todayNote(); textSize = 14f; typeface = body(); setTextColor(skin.accent); setPadding(0, dp(4), 0, 0) })
+        idleBox = idle
+        content.addView(idle, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = dp(200) })
+        content.addView(makeHero(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = dp(200) })
+        val st = widgetStack(2)
+        if (st.childCount > 0) content.addView(st, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(90), dp(28), 0) })
  
-        val st = widgetStack(0)
-        if (st.childCount > 0) content.addView(st, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(92), dp(24), 0) })
+        // zona inferior: pestañas + medidores chicos, y una sola fila de apps
+        val rowHolder = LinearLayout(this)
+        val scroller = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(dp(24), dp(10), dp(24), dp(10)); addView(rowHolder)
+        }
+        val tabViews = ArrayList<TextView>()
+        fun render() {
+            rowHolder.removeAllViews()
+            val list = cats[cur].second
+            if (list.isEmpty()) rowHolder.addView(TextView(this).apply {
+                text = "Mantén pulsado OK sobre una app de «Todas» para fijarla aquí"
+                textSize = 14f; typeface = body(); setTextColor(0xFFD6D0E0.toInt()); setPadding(dp(10), dp(30), 0, dp(30))
+            })
+            for (ri in list) rowHolder.addView(horizonCard(ri), LinearLayout.LayoutParams(dp((100 * s).toInt()), dp((104 * s).toInt())).apply { rightMargin = dp(10) })
+            scroller.scrollTo(0, 0)
+            for ((i, tv) in tabViews.withIndex()) {
+                tv.setTextColor(if (i == cur) skin.accent else 0xFFD6D0E0.toInt())
+                tv.typeface = if (i == cur) Typeface.DEFAULT_BOLD else body()
+            }
+        }
+        val tabsRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        for ((i, c) in cats.withIndex()) {
+            val tv = TextView(this).apply { text = c.first; textSize = 14f; setPadding(dp(16), dp(8), dp(16), dp(8)) }
+            tabViews.add(tv)
+            tabsRow.addView(focusable(tv, 20, { cur = i; prefs.edit().putInt("htab", i).apply(); render() }, null, null, 1.08f) { f ->
+                if (f && cur != i) { cur = i; prefs.edit().putInt("htab", i).apply(); render() }
+            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(6) })
+        }
+        val tabLine = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(24), 0, dp(28), 0) }
+        tabLine.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(0, dp(6), 0, dp(6)); addView(tabsRow) },
+            LinearLayout.LayoutParams(0, WRAP, 1f))
+        if (flag("wg_gauges")) { val m = MiniDials(this); miniV = m; tabLine.addView(m, LinearLayout.LayoutParams(dp(196), dp(64))) }
+        val bottom = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        bottom.addView(tabLine); bottom.addView(scroller)
+        content.addView(bottom, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply { bottomMargin = dp(8) })
+        render()
+ 
         root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
         if (railOn) root.addView(sideRail(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply { leftMargin = dp(8) })
-        finishRoot(root, Gravity.BOTTOM or Gravity.END, true, first)
+        finishRoot(root, Gravity.TOP or Gravity.CENTER_HORIZONTAL, false, rowHolder.getChildAt(0))
     }
  
     // ---------- temporadas ----------
@@ -3081,11 +3135,11 @@ class MainActivity : Activity() {
             Opt("Tamaño de iconos: ${sizeNames[prefs.getInt("size", 1) % 3]}") { prefs.edit().putInt("size", prefs.getInt("size", 1) + 1).apply(); build(); stylePanel() },
             Opt("Barra y widgets…") { barPanel() },
             Opt("Aplicar diseño recomendado") {
-                prefs.edit().putInt("layout", 1).putInt("theme", 2).putInt("font", 0).putInt("cstyle", 0).putInt("gstyle", 4).putInt("wxs", 1).apply()
+                prefs.edit().putInt("layout", 2).putInt("theme", 2).putInt("font", 0).putInt("cstyle", 0).putInt("gstyle", 4).putInt("wxs", 1).putInt("btnpos", 0).apply()
                 build(); stylePanel()
             },
             Opt("Volver") { customPanel() }
-        ), "Recomendado: Aurora Dock con tema Aurora, tipografía Moderna y medidor Orbital.")
+        ), "Recomendado: Horizonte con tema Aurora, tipografía Moderna y botones en la barra superior.")
     }
  
     private fun barPanel() {
