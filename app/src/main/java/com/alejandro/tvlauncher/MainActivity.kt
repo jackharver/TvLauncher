@@ -12,8 +12,10 @@ import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ResolveInfo
 import android.graphics.*
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaMetadata
@@ -37,6 +39,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.animation.LinearInterpolator
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -101,7 +104,10 @@ class MainActivity : Activity() {
     private val fontNames = arrayOf("Moderna", "Tecnológica", "Consola", "Elegante", "Casual")
     private val clkNames = arrayOf("Delgado", "Neón", "Doble línea", "Tecnológico", "Minimal")
     private val wxsNames = arrayOf("Texto", "Icono", "Detalle", "Oculto")
-    private val layoutNames = arrayOf("Cine", "Aurora Dock")
+    private val layoutNames = arrayOf("Cine", "Aurora Dock", "Consola")
+    private val menuNames = arrayOf("Lista", "Juego")
+    private var menuRefresh: (() -> Unit)? = null
+    private val patCache = HashMap<Int, Bitmap>()
     private var orbV: OrbitalView? = null
     private var hudV: HudView? = null
     private var volView: VolumeView? = null
@@ -142,7 +148,7 @@ class MainActivity : Activity() {
     private var mediaPlay: TextView? = null
     private var ctrl: MediaController? = null
     private val seasonNames = arrayOf("Automática", "Apagada", "Halloween", "Día de Muertos", "Navidad", "San Valentín")
-    private val cardNames = arrayOf("Cristal", "Sólido", "Neón")
+    private val cardNames = arrayOf("Cristal", "Sólido", "Neón", "Carbono", "Puntos", "Diagonal", "Escaneo")
     private val sndNames = arrayOf("Apagados", "Suave", "Tecno", "Retro")
     private val volNames = arrayOf("Bajo", "Medio", "Alto")
     private var sp: SoundPool? = null
@@ -1118,11 +1124,11 @@ class MainActivity : Activity() {
     }
  
     // estilos de tarjeta: 0 cristal, 1 sólido, 2 neón
-    private fun glass(focused: Boolean, radius: Int): GradientDrawable {
+    private fun glassBase(focused: Boolean, radius: Int): GradientDrawable {
         val a = skin.accent
         val fill: IntArray; val sw: Int; val sc: Int
-        when (prefs.getInt("cstyle", 0) % 3) {
-            1 -> {
+        when (prefs.getInt("cstyle", 0) % 7) {
+            1, 3, 4, 5, 6 -> {
                 fill = if (focused) intArrayOf(0xFF2E2B45.toInt(), 0xFF2E2B45.toInt()) else intArrayOf(0xFF1A1826.toInt(), 0xFF1A1826.toInt())
                 sw = if (focused) 4 else 1; sc = if (focused) a else 0x44FFFFFF
             }
@@ -1140,14 +1146,35 @@ class MainActivity : Activity() {
         }
     }
  
-    private fun focusable(v: View, radius: Int, onClick: () -> Unit, onLong: (() -> Unit)? = null, pop: View? = null, popScale: Float = 1.18f): View {
+    private fun pattern(kind: Int): Bitmap = patCache.getOrPut(kind) {
+        val s = dp(when (kind) { 3 -> 8; 4 -> 10; 5 -> 12; else -> 4 }).coerceAtLeast(4)
+        val b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b); val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        when (kind) {
+            3 -> { val h = s / 2; for (i in 0..1) for (j in 0..1) { p.color = if ((i + j) % 2 == 0) 0x1AFFFFFF else 0x22000000; c.drawRect((i * h).toFloat(), (j * h).toFloat(), ((i + 1) * h).toFloat(), ((j + 1) * h).toFloat(), p) } }
+            4 -> { p.color = 0x33FFFFFF; c.drawCircle(s / 2f, s / 2f, s * 0.09f, p) }
+            5 -> { p.color = 0x1FFFFFFF; p.strokeWidth = s * 0.16f; c.drawLine(0f, s.toFloat(), s.toFloat(), 0f, p) }
+            else -> { p.color = 0x55000000; c.drawRect(0f, s * 0.5f, s.toFloat(), s.toFloat(), p); p.color = 0x0DFFFFFF; c.drawRect(0f, 0f, s.toFloat(), s * 0.25f, p) }
+        }
+        b
+    }
+ 
+    private fun glass(focused: Boolean, radius: Int): Drawable {
+        val cs = prefs.getInt("cstyle", 0) % 7
+        val base = glassBase(focused, radius)
+        if (cs < 3) return base
+        val tile = BitmapDrawable(resources, pattern(cs)).apply { setTileModeXY(Shader.TileMode.REPEAT, Shader.TileMode.REPEAT) }
+        return LayerDrawable(arrayOf(base, tile))
+    }
+ 
+    private fun focusable(v: View, radius: Int, onClick: () -> Unit, onLong: (() -> Unit)? = null, pop: View? = null, popScale: Float = 1.18f, onFocus: ((Boolean) -> Unit)? = null): View {
         v.isFocusable = true; v.isClickable = true; v.clipToOutline = true
         fun paint(f: Boolean) {
             v.background = glass(f, radius)
             pop?.animate()?.scaleX(if (f) popScale else 1f)?.scaleY(if (f) popScale else 1f)?.setDuration(180)?.start()
         }
         paint(false)
-        v.setOnFocusChangeListener { _, f -> paint(f); if (f) sfx(0) }
+        v.setOnFocusChangeListener { _, f -> paint(f); if (f) sfx(0); onFocus?.invoke(f) }
         v.setOnClickListener { sfx(1); onClick() }
         if (onLong != null) v.setOnLongClickListener { onLong(); true }
         return v
@@ -1492,7 +1519,10 @@ class MainActivity : Activity() {
     }
  
     private fun build() {
-        if (prefs.getInt("layout", 0) % 2 == 1) { buildDock(); return }
+        when (prefs.getInt("layout", 0) % 3) {
+            1 -> { buildDock(); return }
+            2 -> { buildConsole(); return }
+        }
         val hidden = getSet("hidden"); val favs = getSet("fav")
         val visible = apps().filter { it.activityInfo.packageName !in hidden }
         val favApps = visible.filter { it.activityInfo.packageName in favs }
@@ -1704,14 +1734,14 @@ class MainActivity : Activity() {
  
     private fun liteOn(): Boolean = prefs.getBoolean("lite", false)
  
-    private fun toggleLite() {
+    private fun toggleLite(reopen: Boolean = true) {
         val on = !liteOn(); prefs.edit().putBoolean("lite", on).apply()
         try {
             val sc = if (on) "0.5" else "1.0"
             for (k in listOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale"))
                 Settings.Global.putString(contentResolver, k, sc)
         } catch (e: SecurityException) { }
-        build(); customPanel()
+        build(); if (reopen) customPanel()
     }
  
     private fun addOverlays(root: FrameLayout, hudGravity: Int, hud: Boolean) {
@@ -1873,6 +1903,335 @@ class MainActivity : Activity() {
         sfxReady = false; handler.postDelayed({ sfxReady = true }, 900)
         setContentView(root)
         dock.getChildAt(0)?.requestFocus()
+        updateCaption(); refreshStats(); renderWeather()
+        if (flag("wg_weather")) { lastWx = 0L; fetchWeather() }
+    }
+ 
+    // ---------- menú de juego (cambios en vivo) ----------
+    private class GSetting(val label: String, val kind: Int, val get: () -> String, val act: (Int) -> Unit)
+    private class GTab(val name: String, val items: () -> List<GSetting>)
+ 
+    private fun gChoice(label: String, key: String, names: Array<String>, def: Int = 0, extra: () -> Unit = { }): GSetting {
+        val n = names.size
+        return GSetting(label, 0, { names[((prefs.getInt(key, def) % n) + n) % n] }) { d ->
+            val cur = ((prefs.getInt(key, def) % n) + n) % n
+            prefs.edit().putInt(key, (cur + (if (d == 0) 1 else d) + n) % n).apply()
+            extra(); build()
+        }
+    }
+ 
+    private fun gSwitch(label: String, key: String, def: Boolean = true): GSetting =
+        GSetting(label, 1, { if (prefs.getBoolean(key, def)) "Sí" else "No" }) { _ ->
+            prefs.edit().putBoolean(key, !prefs.getBoolean(key, def)).apply(); build()
+        }
+ 
+    private fun gAction(label: String, run: () -> Unit): GSetting = GSetting(label, 2, { "" }) { d -> if (d == 0) run() }
+ 
+    private fun gameTabs(): List<GTab> = listOf(
+        GTab("DISEÑO") { listOf(
+            gChoice("Diseño de inicio", "layout", layoutNames),
+            gChoice("Tema de color", "theme", skins.map { it.name }.toTypedArray()),
+            gChoice("Tipografía", "font", fontNames),
+            gChoice("Tarjetas y texturas", "cstyle", cardNames),
+            gChoice("Temporada", "season", seasonNames),
+            gChoice("Tamaño de iconos", "size", sizeNames, 1),
+            gChoice("Barra superior", "bar", barNames),
+            gChoice("Reloj", "clk", clkNames),
+            gChoice("Clima en la barra", "wxs", wxsNames)
+        ) },
+        GTab("WIDGETS") { listOf(
+            gChoice("Medidores", "gstyle", gNames),
+            gChoice("Reproductor de música", "mstyle", mstyleNames),
+            gSwitch("Mostrar medidores", "wg_gauges"),
+            gSwitch("Estado de entradas", "wg_status"),
+            gSwitch("Clima", "wg_weather"),
+            gSwitch("Reproductor", "wg_media"),
+            gSwitch("Etiquetas rápidas", "wg_hud"),
+            gSwitch("Fila de información", "wg_info"),
+            gSwitch("Reloj analógico", "wg_aclock", false),
+            gSwitch("Reloj en palabras", "wg_words", false),
+            gSwitch("Calendario", "wg_cal", false),
+            gSwitch("Sol y aire", "wg_sky", false),
+            gSwitch("Tráfico de red", "wg_netg", false),
+            gSwitch("Progreso del tiempo", "wg_tprog", false)
+        ) },
+        GTab("FONDOS") { listOf(
+            GSetting("Origen", 0, { if (prefs.getInt("wallmode", 0) == 0) "Mis imágenes" else "Cartelera" }) { _ ->
+                val mode = prefs.getInt("wallmode", 0)
+                prefs.edit().putInt("wallmode", 1 - mode).putInt("wall", -1).apply()
+                wallBmp = null
+                if (mode == 0) refreshCartelera() else nextWall()
+            },
+            gAction("Siguiente fondo") { nextWall() },
+            GSetting("Ajuste", 0, { if (prefs.getInt("fit", 0) == 0) "Llenar" else "Ajustar" }) { _ ->
+                prefs.edit().putInt("fit", 1 - prefs.getInt("fit", 0)).apply(); applyWall(false)
+            },
+            gChoice("Cambio automático", "auto", autoNames) { scheduleWall() },
+            gAction("Actualizar cartelera") { refreshCartelera() }
+        ) },
+        GTab("AUDIO") { listOf(
+            GSetting("Sonidos de navegación", 0, { sndNames[sndMode()] }) { d ->
+                prefs.edit().putInt("snd", (sndMode() + (if (d == 0) 1 else d) + 4) % 4).apply(); loadSounds(); sfxReady = true; sfx(1)
+            },
+            gChoice("Volumen de sonidos", "sndvol", volNames, 1) { sfx(1) },
+            gSwitch("Barra de volumen neón", "volbar"),
+            gAction("Probar barra de volumen") { showVolume() },
+            gSwitch("Voz del asistente", "tts"),
+            GSetting("Motor del asistente", 0, { if (prefs.getInt("ai", 0) == 1) "ChatGPT" else "Claude" }) { _ ->
+                prefs.edit().putInt("ai", 1 - prefs.getInt("ai", 0)).apply()
+            }
+        ) },
+        GTab("SISTEMA") { listOf(
+            gAction("Optimizar sistema ahora") { optimize() },
+            GSetting("Modo ligero", 1, { onOff(liteOn()) }) { _ -> toggleLite(false) },
+            GSetting("Bloqueo de anuncios (DNS)", 1, { onOff(dnsOn()) }) { _ -> toggleDns() },
+            gSwitch("Pantalla de bienvenida", "splash"),
+            gSwitch("Bienvenida al despertar", "splash_wake"),
+            gAction("Probar bienvenida") { replaySplash() },
+            GSetting("Tu nombre", 2, { userName().ifEmpty { "sin definir" } }) { d -> if (d == 0) askName() },
+            gChoice("Estilo del menú", "menu", menuNames),
+            gChoice("Posición del menú", "menupos", arrayOf("Derecha", "Izquierda")),
+            gAction("Mostrar apps ocultas") { putSet("hidden", emptySet()); build() },
+            gAction("Ajustes de la TV") { go(Intent(Settings.ACTION_SETTINGS)) }
+        ) }
+    )
+ 
+    private fun menuBg(right: Boolean): GradientDrawable {
+        val r = dp(26).toFloat()
+        return GradientDrawable(if (right) GradientDrawable.Orientation.LEFT_RIGHT else GradientDrawable.Orientation.RIGHT_LEFT,
+            intArrayOf(0xE60B0A14.toInt(), 0xF2161226.toInt())).apply {
+            cornerRadii = if (right) floatArrayOf(r, r, 0f, 0f, 0f, 0f, r, r) else floatArrayOf(0f, 0f, r, r, r, r, 0f, 0f)
+            setStroke(dp(2), withAlpha(skin.accent, 0x77))
+        }
+    }
+ 
+    private fun gameMenu() {
+        val d = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
+        val right = prefs.getInt("menupos", 0) % 2 == 0
+        val tabs = gameTabs()
+        var cur = 0
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(12)); background = menuBg(right) }
+ 
+        val head = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(4), 0, 0, dp(10)) }
+        head.addView(View(this).apply { setBackgroundColor(skin.accent) }, LinearLayout.LayoutParams(dp(5), dp(26)).apply { rightMargin = dp(12) })
+        head.addView(TextView(this).apply { text = "AJUSTES"; textSize = 22f; letterSpacing = 0.25f; typeface = disp(); setTextColor(Color.WHITE) },
+            LinearLayout.LayoutParams(0, WRAP, 1f))
+        head.addView(TextView(this).apply {
+            text = "EN VIVO"; textSize = 11f; letterSpacing = 0.2f; typeface = Typeface.DEFAULT_BOLD; setTextColor(skin.accent)
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(withAlpha(skin.accent, 0x2A)) }
+            setPadding(dp(10), dp(3), dp(10), dp(3))
+        })
+        box.addView(head)
+ 
+        val tabsRow = LinearLayout(this)
+        val tabViews = ArrayList<TextView>()
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(2), dp(6), dp(2), dp(6)) }
+        val valueViews = ArrayList<Pair<GSetting, TextView>>()
+ 
+        fun valueText(st: GSetting): String = when (st.kind) {
+            0 -> "‹  ${st.get()}  ›"
+            1 -> st.get()
+            else -> if (st.get().isEmpty()) "›" else "${st.get()}  ›"
+        }
+        fun refresh() {
+            for (pr in valueViews) pr.second.text = valueText(pr.first)
+            for ((i, tv) in tabViews.withIndex()) tv.setTextColor(if (i == cur) skin.accent else 0xFFB0A9BC.toInt())
+        }
+        fun render() {
+            list.removeAllViews(); valueViews.clear()
+            for (st in tabs[cur].items()) {
+                val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(16), dp(11), dp(16), dp(11)) }
+                row.addView(TextView(this).apply { text = st.label; textSize = 17f; typeface = body(); setTextColor(Color.WHITE) },
+                    LinearLayout.LayoutParams(0, WRAP, 1f))
+                val vt = TextView(this).apply { textSize = 15f; typeface = Typeface.DEFAULT_BOLD; setTextColor(skin.accent) }
+                if (st.kind == 1) {
+                    vt.setPadding(dp(14), dp(4), dp(14), dp(4))
+                    vt.background = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(withAlpha(skin.accent, 0x30)) }
+                }
+                row.addView(vt)
+                valueViews.add(Pair(st, vt))
+                focusable(row, 14, { st.act(0); refresh() })
+                row.setOnKeyListener { _, code, ev ->
+                    if (st.kind <= 1 && ev.action == KeyEvent.ACTION_DOWN && (code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                        st.act(if (code == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1); refresh(); sfx(1); true
+                    } else false
+                }
+                list.addView(row, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(5) })
+            }
+            refresh()
+        }
+        for ((i, t) in tabs.withIndex()) {
+            val tv = TextView(this).apply { text = t.name; textSize = 13f; letterSpacing = 0.12f; typeface = Typeface.DEFAULT_BOLD; setPadding(dp(14), dp(8), dp(14), dp(8)) }
+            tabViews.add(tv)
+            tabsRow.addView(focusable(tv, 18, { cur = i; render() }, null, null, 1.1f) { f -> if (f) { cur = i; render() } },
+                LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(6) })
+        }
+        box.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(0, dp(4), 0, dp(6)); addView(tabsRow)
+        })
+        render()
+        box.addView(ScrollView(this).apply { isVerticalScrollBarEnabled = false; clipToPadding = false; addView(list) }, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        box.addView(TextView(this).apply {
+            text = "‹ ›  CAMBIAR      OK  APLICAR      ATRÁS  CERRAR"; textSize = 11f; letterSpacing = 0.1f; typeface = body()
+            setTextColor(0xFF8D86A0.toInt()); gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0)
+        })
+ 
+        val wrap = FrameLayout(this)
+        wrap.addView(box, FrameLayout.LayoutParams(dp(470), MATCH, if (right) Gravity.END else Gravity.START))
+        menuRefresh = { refresh() }
+        d.setOnDismissListener { menuRefresh = null }
+        d.setContentView(wrap)
+        d.window?.setLayout(MATCH, MATCH)
+        d.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        d.show()
+        list.getChildAt(0)?.requestFocus()
+    }
+ 
+    // ---------- diseño Consola (inspirado en menús de videojuegos) ----------
+    private inner class CircleBtn(ctx: Context, val kind: Int) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val path = Path()
+        private val rect = RectF()
+        override fun onDraw(c: Canvas) {
+            val s = width.toFloat(); val cx = s / 2; val cy = s / 2
+            p.style = Paint.Style.STROKE; p.strokeWidth = s * 0.04f; p.color = withAlpha(skin.accent, 0xAA); c.drawCircle(cx, cy, s * 0.46f, p)
+            p.strokeWidth = s * 0.06f; p.strokeCap = Paint.Cap.ROUND; p.strokeJoin = Paint.Join.ROUND; p.color = Color.WHITE
+            when (kind) {
+                0 -> {
+                    rect.set(cx - s * 0.1f, cy - s * 0.2f, cx + s * 0.28f, cy + s * 0.2f); c.drawRoundRect(rect, s * 0.04f, s * 0.04f, p)
+                    c.drawLine(cx - s * 0.32f, cy, cx + s * 0.02f, cy, p)
+                    c.drawLine(cx - s * 0.12f, cy - s * 0.1f, cx + s * 0.02f, cy, p); c.drawLine(cx - s * 0.12f, cy + s * 0.1f, cx + s * 0.02f, cy, p)
+                }
+                1 -> {
+                    rect.set(cx - s * 0.26f, cy - s * 0.2f, cx + s * 0.26f, cy + s * 0.2f); c.drawRoundRect(rect, s * 0.04f, s * 0.04f, p)
+                    for (i in 1..2) {
+                        val r = s * 0.12f * i
+                        rect.set(cx - s * 0.26f - r, cy + s * 0.2f - r, cx - s * 0.26f + r, cy + s * 0.2f + r); c.drawArc(rect, 270f, 90f, false, p)
+                    }
+                }
+                2 -> {
+                    p.style = Paint.Style.FILL
+                    path.reset(); path.moveTo(cx, cy - s * 0.3f); path.lineTo(cx + s * 0.07f, cy - s * 0.07f); path.lineTo(cx + s * 0.3f, cy)
+                    path.lineTo(cx + s * 0.07f, cy + s * 0.07f); path.lineTo(cx, cy + s * 0.3f); path.lineTo(cx - s * 0.07f, cy + s * 0.07f)
+                    path.lineTo(cx - s * 0.3f, cy); path.lineTo(cx - s * 0.07f, cy - s * 0.07f); path.close(); c.drawPath(path, p)
+                }
+                3 -> {
+                    for (i in 0..1) for (j in 0..1) {
+                        val x = cx - s * 0.24f + i * s * 0.26f; val y = cy - s * 0.24f + j * s * 0.26f
+                        rect.set(x, y, x + s * 0.22f, y + s * 0.22f); c.drawRoundRect(rect, s * 0.04f, s * 0.04f, p)
+                    }
+                }
+                4 -> {
+                    p.style = Paint.Style.FILL
+                    path.reset(); path.moveTo(cx + s * 0.06f, cy - s * 0.3f); path.lineTo(cx - s * 0.14f, cy + s * 0.04f); path.lineTo(cx - s * 0.01f, cy + s * 0.04f)
+                    path.lineTo(cx - s * 0.06f, cy + s * 0.3f); path.lineTo(cx + s * 0.14f, cy - s * 0.06f); path.lineTo(cx + s * 0.01f, cy - s * 0.06f); path.close()
+                    c.drawPath(path, p)
+                }
+                else -> {
+                    c.drawCircle(cx, cy, s * 0.11f, p)
+                    for (i in 0 until 8) {
+                        val a = Math.PI * i / 4
+                        c.drawLine(cx + (s * 0.2f * Math.cos(a)).toFloat(), cy + (s * 0.2f * Math.sin(a)).toFloat(),
+                            cx + (s * 0.3f * Math.cos(a)).toFloat(), cy + (s * 0.3f * Math.sin(a)).toFloat(), p)
+                    }
+                }
+            }
+        }
+    }
+ 
+    private fun roundBtn(kind: Int, label: String, onClick: () -> Unit): View {
+        val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(10), dp(8), dp(10), dp(6)) }
+        val cb = CircleBtn(this, kind)
+        v.addView(cb, LinearLayout.LayoutParams(dp(48), dp(48)))
+        v.addView(TextView(this).apply { text = label; textSize = 11f; typeface = body(); setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0) })
+        return focusable(v, 30, onClick, null, cb, 1.15f)
+    }
+ 
+    private fun consoleTile(ri: ResolveInfo, info: TextView): View {
+        val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(packageManager).toString()
+        val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(8), dp(8), dp(8), dp(8)) }
+        val iv = ImageView(this).apply { setImageDrawable(ri.loadIcon(packageManager)) }
+        v.addView(iv, LinearLayout.LayoutParams(dp(76), dp(76)))
+        return focusable(v, 26, { goPkg(pkg) }, { appMenu(pkg, label) }, iv, 1.2f) { f -> if (f) info.text = label }
+    }
+ 
+    private fun buildConsole() {
+        val hidden = getSet("hidden"); val favs = getSet("fav")
+        val visible = apps().filter { it.activityInfo.packageName !in hidden }
+        val favApps = visible.filter { it.activityInfo.packageName in favs }
+        val restApps = visible.filter { it.activityInfo.packageName !in favs }
+        ramG = null; diskG = null; netG = null; tempG = null; statusRow = null; weatherView = null
+        mediaBox = null; heroBox = null; clusterV = null; segV = null; sportV = null; orbV = null; wxIcon = null
+        sysInfo = null; wxBig = null; wxDesc2 = null; wxDetail = null; wxTom = null; indicators.clear()
+        val root = baseRoot(intArrayOf(0x55000000, 0x22000000, 0xDD000000.toInt()))
+ 
+        val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(40), dp(12), dp(40), dp(8)) }
+        val nm = userName()
+        top.addView(TextView(this).apply {
+            text = if (nm.isEmpty()) "•" else nm.substring(0, 1).uppercase(); textSize = 18f; typeface = Typeface.DEFAULT_BOLD
+            setTextColor(0xFF05050A.toInt()); gravity = Gravity.CENTER; background = oval(skin.accent)
+        }, LinearLayout.LayoutParams(dp(40), dp(40)))
+        top.addView(TextView(this).apply {
+            text = greetingText(); textSize = 16f; typeface = body(); setTextColor(Color.WHITE); setShadowLayer(6f, 0f, 2f, Color.BLACK); setPadding(dp(12), 0, 0, 0)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        top.addView(indicatorRow(), LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(18) })
+        if (flag("wg_weather")) {
+            weatherView = TextView(this).apply { textSize = 16f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK) }
+            top.addView(weatherView, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(16) })
+        }
+        top.addView(clockView())
+        root.addView(top, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
+ 
+        val info = TextView(this).apply {
+            textSize = 30f; typeface = disp(); setTextColor(Color.WHITE); setShadowLayer(8f, 0f, 2f, Color.BLACK); maxLines = 1; setPadding(dp(8), 0, 0, 0)
+            text = (favApps.firstOrNull() ?: restApps.firstOrNull())?.loadLabel(packageManager)?.toString() ?: ""
+        }
+        val tiles = LinearLayout(this)
+        (favApps + restApps.take(10)).forEach { tiles.addView(consoleTile(it, info), LinearLayout.LayoutParams(dp(132), dp(132)).apply { rightMargin = dp(12) }) }
+        val gi = GridIcon(this)
+        val all = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(8), dp(8), dp(8), dp(8)) }
+        all.addView(gi, LinearLayout.LayoutParams(dp(60), dp(60)))
+        tiles.addView(focusable(all, 26, { drawer() }, null, gi, 1.2f) { f -> if (f) info.text = "Todas las apps" }, LinearLayout.LayoutParams(dp(132), dp(132)))
+        val area = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        area.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(dp(8), dp(12), dp(8), dp(12)); addView(tiles)
+        })
+        area.addView(info)
+        area.addView(TextView(this).apply { text = "Mantén OK sobre una app para fijarla u ocultarla"; textSize = 12f; typeface = body(); setTextColor(0xFFD6D0E0.toInt()); setPadding(dp(8), dp(2), 0, 0) })
+        val aw = resources.displayMetrics.widthPixels - dp(40 + 40 + 330)
+        root.addView(area, FrameLayout.LayoutParams(aw, WRAP, Gravity.TOP or Gravity.START).apply { setMargins(dp(32), dp(62), 0, 0) })
+ 
+        val rc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (flag("wg_gauges")) {
+            val card = LinearLayout(this).apply { setPadding(dp(14), dp(8), dp(14), dp(8)); background = dark(26) }
+            segV = SegView(this); card.addView(segV, LinearLayout.LayoutParams(dp(300), dp(124)))
+            rc.addView(card)
+        }
+        if (flag("wg_media")) rc.addView(mediaCard(), LinearLayout.LayoutParams(dp(328), WRAP).apply { topMargin = dp(10) })
+        root.addView(rc, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(62), dp(36), 0) })
+ 
+        root.addView(makeHero(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = dp(124) })
+ 
+        val btns = LinearLayout(this).apply { gravity = Gravity.CENTER; background = dark(38); setPadding(dp(14), dp(4), dp(14), dp(4)) }
+        fun bg() = LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(4); rightMargin = dp(4) }
+        btns.addView(roundBtn(0, "Entrada") { inputPanel() }, bg())
+        btns.addView(roundBtn(1, "Compartir") {
+            val ok = listOf("com.homwee.multiscreenshare", "com.homwee.mmp.screenshare").firstOrNull { goPkg(it) }
+            if (ok == null) toast("No disponible en esta TV")
+        }, bg())
+        btns.addView(roundBtn(2, "Asistente") { assistantPanel() }, bg())
+        btns.addView(roundBtn(3, "Paneles") { panelsOverlay() }, bg())
+        btns.addView(roundBtn(4, "Optimizar") { optimize() }, bg())
+        btns.addView(roundBtn(5, "Ajustes") { customPanel() }, bg())
+        root.addView(btns, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(14) })
+ 
+        addOverlays(root, Gravity.TOP or Gravity.CENTER_HORIZONTAL, false)
+        val fx = seasonFx()
+        if (fx.isNotEmpty()) root.addView(SeasonView(this, fx), FrameLayout.LayoutParams(MATCH, MATCH))
+        if (!splashShown && flag("splash")) { splashShown = true; root.addView(splashView(), FrameLayout.LayoutParams(MATCH, MATCH)) }
+        sfxReady = false; handler.postDelayed({ sfxReady = true }, 900)
+        setContentView(root)
+        tiles.getChildAt(0)?.requestFocus()
         updateCaption(); refreshStats(); renderWeather()
         if (flag("wg_weather")) { lastWx = 0L; fetchWeather() }
     }
@@ -2283,7 +2642,10 @@ class MainActivity : Activity() {
     private fun askName() {
         val et = EditText(this).apply { setText(userName()); hint = "Tu nombre"; isSingleLine = true }
         AlertDialog.Builder(this).setTitle("¿Cómo te llamas?").setView(et)
-            .setPositiveButton("Guardar") { _, _ -> prefs.edit().putString("uname", et.text.toString().trim()).apply(); customPanel() }
+            .setPositiveButton("Guardar") { _, _ ->
+                prefs.edit().putString("uname", et.text.toString().trim()).apply(); build()
+                val mr = menuRefresh; if (mr != null) mr() else customPanel()
+            }
             .setNegativeButton("Cancelar", null).show()
     }
  
@@ -2406,10 +2768,10 @@ class MainActivity : Activity() {
  
     private fun stylePanel() {
         panel("Estilo", listOf(
-            Opt("Diseño: ${layoutNames[prefs.getInt("layout", 0) % 2]}") { prefs.edit().putInt("layout", prefs.getInt("layout", 0) + 1).apply(); build(); stylePanel() },
+            Opt("Diseño: ${layoutNames[prefs.getInt("layout", 0) % 3]}") { prefs.edit().putInt("layout", prefs.getInt("layout", 0) + 1).apply(); build(); stylePanel() },
             Opt("Tema de color: ${skin.name}") { prefs.edit().putInt("theme", prefs.getInt("theme", 0) + 1).apply(); build(); stylePanel() },
             Opt("Tipografía: ${fontNames[fontIdx()]}") { prefs.edit().putInt("font", prefs.getInt("font", 0) + 1).apply(); build(); stylePanel() },
-            Opt("Tarjetas: ${cardNames[prefs.getInt("cstyle", 0) % 3]}") { prefs.edit().putInt("cstyle", prefs.getInt("cstyle", 0) + 1).apply(); build(); stylePanel() },
+            Opt("Tarjetas: ${cardNames[prefs.getInt("cstyle", 0) % 7]}") { prefs.edit().putInt("cstyle", prefs.getInt("cstyle", 0) + 1).apply(); build(); stylePanel() },
             Opt("Temporada: ${seasonNames[prefs.getInt("season", 0) % 6]}") { prefs.edit().putInt("season", prefs.getInt("season", 0) + 1).apply(); build(); stylePanel() },
             Opt("Tamaño de iconos: ${sizeNames[prefs.getInt("size", 1) % 3]}") { prefs.edit().putInt("size", prefs.getInt("size", 1) + 1).apply(); build(); stylePanel() },
             Opt("Barra y widgets…") { barPanel() },
@@ -2433,8 +2795,11 @@ class MainActivity : Activity() {
         ))
     }
  
-    private fun customPanel() {
+    private fun customPanel() { if (prefs.getInt("menu", 0) % 2 == 1) gameMenu() else customList() }
+ 
+    private fun customList() {
         panel("Personalizar", listOf(
+            Opt("Estilo del menú: ${menuNames[prefs.getInt("menu", 0) % 2]}") { prefs.edit().putInt("menu", prefs.getInt("menu", 0) + 1).apply(); customPanel() },
             Opt("Estilo…") { stylePanel() },
             Opt("Fondos…") { wallPanel() },
             Opt("Widgets…") { widgetsPanel() },
