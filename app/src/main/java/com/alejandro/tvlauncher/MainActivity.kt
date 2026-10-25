@@ -53,7 +53,7 @@ import java.util.Locale
 class MainActivity : Activity() {
     private class Skin(val name: String, val top: Int, val bottom: Int, val accent: Int)
     private class Opt(val label: String, val run: () -> Unit)
-    private class Wall(val file: File, val title: String?, val pkg: String?, val prov: String?)
+    private class Wall(val file: File, val title: String?, val pkg: String?, val prov: String?, val ov: String? = null, val rate: String? = null)
  
     private val skins = listOf(
         Skin("Ámbar", 0xFF2B1B10.toInt(), 0xFF0F0E17.toInt(), 0xFFFFB347.toInt()),
@@ -104,7 +104,7 @@ class MainActivity : Activity() {
     private val fontNames = arrayOf("Moderna", "Tecnológica", "Consola", "Elegante", "Casual")
     private val clkNames = arrayOf("Delgado", "Neón", "Doble línea", "Tecnológico", "Minimal")
     private val wxsNames = arrayOf("Texto", "Icono", "Detalle", "Oculto")
-    private val layoutNames = arrayOf("Cine", "Aurora Dock", "Consola")
+    private val layoutNames = arrayOf("Cine", "Aurora Dock", "Mosaico")
     private val menuNames = arrayOf("Lista", "Juego")
     private var menuRefresh: (() -> Unit)? = null
     private val patCache = HashMap<Int, Bitmap>()
@@ -112,6 +112,16 @@ class MainActivity : Activity() {
     private var hudV: HudView? = null
     private var volView: VolumeView? = null
     private var wxIcon: WxIcon? = null
+    private var heroSyn: TextView? = null
+    private var miniV: MiniDials? = null
+    private var tickerView: TextView? = null
+    private var tickerItems: List<String> = emptyList()
+    private var tickerIdx = 0
+    private var sportsItems: List<String> = emptyList()
+    private var lastEv = 0L
+    private var carouselTask: Runnable? = null
+    private var wxDetailS = ""
+    private var wxTomS = ""
     private var mediaProg: ProgView? = null
     private var eqV: EqView? = null
     private var mediaSpin: ObjectAnimator? = null
@@ -130,7 +140,7 @@ class MainActivity : Activity() {
     private var wxCode = 0
     private var wxDescS = ""
     private val volHide = Runnable { volView?.animate()?.alpha(0f)?.setDuration(300)?.start() }
-    private val barNames = arrayOf("Clásica", "Tablero", "Deportiva")
+    private val barNames = arrayOf("Estándar", "Con barra deportiva", "Mínima")
     private var ramG: GaugeView? = null
     private var diskG: GaugeView? = null
     private var netG: GaugeView? = null
@@ -148,7 +158,7 @@ class MainActivity : Activity() {
     private var mediaPlay: TextView? = null
     private var ctrl: MediaController? = null
     private val seasonNames = arrayOf("Automática", "Apagada", "Halloween", "Día de Muertos", "Navidad", "San Valentín")
-    private val cardNames = arrayOf("Cristal", "Sólido", "Neón", "Carbono", "Puntos", "Diagonal", "Escaneo")
+    private val cardNames = arrayOf("Cristal", "Sólido", "Neón", "Circuito", "Hexágonos", "Rejilla HUD", "Chevrones")
     private val sndNames = arrayOf("Apagados", "Suave", "Tecno", "Retro")
     private val volNames = arrayOf("Bajo", "Medio", "Alto")
     private var sp: SoundPool? = null
@@ -211,6 +221,12 @@ class MainActivity : Activity() {
         handler.removeCallbacks(tick); handler.post(tick)
         scheduleWall()
         resumed = true
+        handler.removeCallbacks(tickerTask); handler.postDelayed(tickerTask, 5500)
+        if (flag("wg_events") && System.currentTimeMillis() - lastEv > 10 * 60_000L) fetchEvents()
+        if (prefs.getInt("wallmode", 0) == 1) {
+            val ix = File(cacheDir, "cartelera/index.json")
+            if (!ix.exists() || System.currentTimeMillis() - ix.lastModified() > 12 * 3600_000L) refreshCartelera(true)
+        }
         if (pendingSplash) { pendingSplash = false; replaySplash() }
         if (flag("wg_weather") && System.currentTimeMillis() - lastWx > 30 * 60_000L) fetchWeather()
     }
@@ -218,6 +234,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         resumed = false
+        handler.removeCallbacks(tickerTask)
         handler.removeCallbacks(tick); handler.removeCallbacks(wallTask)
     }
  
@@ -273,7 +290,7 @@ class MainActivity : Activity() {
                 val arr = JSONArray(File(cacheDir, "cartelera/index.json").readText())
                 (0 until arr.length()).map {
                     val o = arr.getJSONObject(it)
-                    Wall(File(cacheDir, "cartelera/" + o.getString("f")), o.getString("t"), o.getString("p"), o.getString("v"))
+                    Wall(File(cacheDir, "cartelera/" + o.getString("f")), o.getString("t"), o.getString("p"), o.getString("v"), o.optString("o"), o.optString("r"))
                 }.filter { it.file.exists() }
             } catch (e: Throwable) { emptyList() }
         }
@@ -316,11 +333,15 @@ class MainActivity : Activity() {
         val w = curWall
         val t = w?.title
         if (prefs.getInt("wallmode", 0) == 1 && w != null && t != null) {
-            heroProv?.text = (w.prov ?: "").uppercase()
+            val r = w.rate ?: ""
+            heroProv?.text = (w.prov ?: "").uppercase() + (if (r.isNotEmpty() && r != "0.0") "   ·   $r/10" else "")
             heroTitle?.text = t
-            heroBtn?.text = "Ver en ${w.prov}"
+            heroSyn?.text = w.ov ?: ""
             val p = w.pkg
-            captionAction = { if (p != null) goPkg(p) }
+            if (!p.isNullOrEmpty() && isInstalled(p)) {
+                heroBtn?.text = "Ver en ${w.prov}"; heroBtn?.visibility = View.VISIBLE
+                captionAction = { goPkg(p) }
+            } else heroBtn?.visibility = View.GONE
             box.visibility = View.VISIBLE
         } else box.visibility = View.GONE
     }
@@ -338,11 +359,11 @@ class MainActivity : Activity() {
         if (s > 0) handler.postDelayed(wallTask, s * 1000L)
     }
  
-    private fun refreshCartelera() {
+    private fun refreshCartelera(quiet: Boolean = false) {
         val keyFile = File(getExternalFilesDir(null), "tmdb.txt")
-        if (!keyFile.exists()) { toast("Falta tmdb.txt con tu clave (ver guía)"); return }
+        if (!keyFile.exists()) { if (!quiet) toast("Falta tmdb.txt con tu clave (ver guía)"); return }
         val key = readLinesRobust(keyFile).firstOrNull() ?: ""
-        toast("Descargando cartelera…")
+        if (!quiet) toast("Descargando cartelera…")
         Thread {
             try {
                 val dir = File(cacheDir, "cartelera"); dir.mkdirs(); dir.listFiles()?.forEach { it.delete() }
@@ -350,25 +371,47 @@ class MainActivity : Activity() {
                     Triple("com.netflix.ninja", 8, "Netflix"), Triple("com.amazon.amazonvideo.livingroom", 119, "Prime Video"),
                     Triple("com.disney.disneyplus", 337, "Disney+"), Triple("com.wbd.stream", 1899, "Max"),
                     Triple("com.apple.atve.androidtv.appletv", 350, "Apple TV+"))
-                var sel = provs.filter { isInstalled(it.first) }
-                if (sel.isEmpty()) sel = provs.take(1)
+                val sel = provs.filter { isInstalled(it.first) }
+                val pool = ArrayList<JSONObject>()
+                val seen = HashSet<String>()
+                fun grab(url: String, label: String, pkg: String, take: Int) {
+                    try {
+                        val res = JSONObject(httpGet(url)).getJSONArray("results")
+                        var c = 0
+                        for (i in 0 until res.length()) {
+                            if (c >= take) break
+                            val m = res.getJSONObject(i)
+                            val bp = m.optString("backdrop_path", "")
+                            val title = m.optString("title", m.optString("name", ""))
+                            if (bp.isEmpty() || bp == "null" || title.isEmpty() || !seen.add(title)) continue
+                            pool.add(JSONObject().put("bp", bp).put("t", title).put("p", pkg).put("v", label)
+                                .put("o", m.optString("overview", "").take(230)).put("r", "%.1f".format(m.optDouble("vote_average", 0.0))))
+                            c++
+                        }
+                    } catch (e: Exception) { }
+                }
+                val base = "https://api.themoviedb.org/3"
+                val q = "api_key=$key&language=es-MX&region=MX"
+                grab("$base/trending/all/day?$q", "Tendencia hoy", "", 5)
+                grab("$base/movie/now_playing?$q&page=${(1..2).random()}", "En cines", "", 4)
+                grab("$base/movie/upcoming?$q&page=1", "Próximamente", "", 3)
+                for (pv in sel) grab("$base/discover/movie?$q&watch_region=MX&with_watch_providers=${pv.second}&with_watch_monetization_types=flatrate&sort_by=popularity.desc&page=${(1..3).random()}", pv.third, pv.first, 4)
+                pool.shuffle()
                 val out = JSONArray(); var n = 0
-                for (p in sel) {
-                    val j = JSONObject(httpGet("https://api.themoviedb.org/3/discover/movie?api_key=$key&language=es-MX&watch_region=MX&with_watch_providers=${p.second}&with_watch_monetization_types=flatrate&sort_by=popularity.desc"))
-                    val res = j.getJSONArray("results"); var c = 0
-                    for (i in 0 until res.length()) {
-                        if (c >= 4) break
-                        val m = res.getJSONObject(i); val bp = m.optString("backdrop_path", "")
-                        if (bp.isEmpty() || bp == "null") continue
+                for (o in pool.take(18)) {
+                    try {
                         val name = "b${n++}.jpg"
-                        URL("https://image.tmdb.org/t/p/w1280$bp").openStream().use { ins -> File(dir, name).outputStream().use { o -> ins.copyTo(o) } }
-                        out.put(JSONObject().put("f", name).put("t", m.optString("title")).put("p", p.first).put("v", p.third))
-                        c++
-                    }
+                        URL("https://image.tmdb.org/t/p/w1280${o.getString("bp")}").openStream().use { ins -> File(dir, name).outputStream().use { ins.copyTo(it) } }
+                        out.put(JSONObject().put("f", name).put("t", o.getString("t")).put("p", o.getString("p")).put("v", o.getString("v"))
+                            .put("o", o.getString("o")).put("r", o.getString("r")))
+                    } catch (e: Exception) { }
                 }
                 File(dir, "index.json").writeText(out.toString())
-                runOnUiThread { toast("Cartelera lista"); nextWall() }
-            } catch (e: Exception) { runOnUiThread { toast("Error de cartelera: revisa tu clave de TMDB") } }
+                runOnUiThread {
+                    if (!quiet) toast("Cartelera lista")
+                    if (prefs.getInt("wallmode", 0) == 1) nextWall()
+                }
+            } catch (e: Exception) { if (!quiet) runOnUiThread { toast("Error de cartelera: revisa tu clave de TMDB") } }
         }.start()
     }
  
@@ -397,7 +440,7 @@ class MainActivity : Activity() {
                 try {
                     aqi = JSONObject(httpGet("https://air-quality-api.open-meteo.com/v1/air-quality?latitude=$lat&longitude=$lon&current=us_aqi")).getJSONObject("current").getInt("us_aqi")
                 } catch (e: Exception) { }
-                wxT = t.toInt(); wxDescS = desc; wxCode = j.getInt("weather_code")
+                wxT = t.toInt(); wxDescS = desc; wxCode = j.getInt("weather_code"); wxDetailS = detail; wxTomS = tom
                 wxFeels = Math.round(j.optDouble("apparent_temperature")).toInt(); wxHum = j.optInt("relative_humidity_2m")
                 runOnUiThread { renderWeather(); wxBig?.text = "$t°"; wxDesc2?.text = desc; wxDetail?.text = detail; wxTom?.text = tom }
             } catch (e: Exception) { lastWx = 0L }
@@ -604,7 +647,7 @@ class MainActivity : Activity() {
             if (!stat.inet && !stat.lan && !stat.wifi) it.set(0f, "OFF", true)
             else if (stat.lan) it.set(1f, "LAN") else it.set(stat.sig, "${(stat.sig * 100).toInt()}%", stat.sig < 0.3f)
         }
-        clusterV?.invalidate(); segV?.invalidate(); sportV?.invalidate(); orbV?.invalidate(); hudV?.invalidate()
+        clusterV?.invalidate(); segV?.invalidate(); sportV?.invalidate(); orbV?.invalidate(); hudV?.invalidate(); miniV?.invalidate()
         indicators.forEach { ind ->
             ind.lit = when (ind.kind) { 0 -> stat.wifi; 1 -> stat.lan; 2 -> btOn(); 3 -> hdmiOn; 4 -> musicOn; 5 -> dnsOn(); else -> stat.inet }
             ind.invalidate()
@@ -1090,7 +1133,10 @@ class MainActivity : Activity() {
         col.addView(head)
         val grid = GridLayout(this).apply { columnCount = 2 }
         for (e in extraWidgets()) grid.addView(widgetCard(e.second, e.third()), GridLayout.LayoutParams().apply { setMargins(dp(8), dp(8), dp(8), dp(8)) })
-        col.addView(ScrollView(this).apply { isVerticalScrollBarEnabled = false; isFocusable = true; addView(grid) })
+        val inner = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        inner.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(infoRow()) })
+        inner.addView(grid)
+        col.addView(ScrollView(this).apply { isVerticalScrollBarEnabled = false; isFocusable = true; addView(inner) })
         wrap.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
         d.setContentView(wrap); d.window?.setLayout(MATCH, MATCH); d.show(); close.requestFocus()
     }
@@ -1146,17 +1192,58 @@ class MainActivity : Activity() {
         }
     }
  
-    private fun pattern(kind: Int): Bitmap = patCache.getOrPut(kind) {
-        val s = dp(when (kind) { 3 -> 8; 4 -> 10; 5 -> 12; else -> 4 }).coerceAtLeast(4)
-        val b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888)
-        val c = Canvas(b); val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private fun pattern(kind: Int): Bitmap = patCache.getOrPut(kind * 31 + (skin.accent and 0xFFFFFF)) {
+        val a = skin.accent
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
         when (kind) {
-            3 -> { val h = s / 2; for (i in 0..1) for (j in 0..1) { p.color = if ((i + j) % 2 == 0) 0x1AFFFFFF else 0x22000000; c.drawRect((i * h).toFloat(), (j * h).toFloat(), ((i + 1) * h).toFloat(), ((j + 1) * h).toFloat(), p) } }
-            4 -> { p.color = 0x33FFFFFF; c.drawCircle(s / 2f, s / 2f, s * 0.09f, p) }
-            5 -> { p.color = 0x1FFFFFFF; p.strokeWidth = s * 0.16f; c.drawLine(0f, s.toFloat(), s.toFloat(), 0f, p) }
-            else -> { p.color = 0x55000000; c.drawRect(0f, s * 0.5f, s.toFloat(), s.toFloat(), p); p.color = 0x0DFFFFFF; c.drawRect(0f, 0f, s.toFloat(), s * 0.25f, p) }
+            3 -> {
+                val s = dp(28).coerceAtLeast(14)
+                val b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888); val c = Canvas(b)
+                val u = s / 7f
+                p.style = Paint.Style.STROKE; p.strokeWidth = maxOf(1f, s * 0.04f); p.color = withAlpha(a, 0x3A)
+                c.drawLine(0f, u * 2, u * 3, u * 2, p); c.drawLine(u * 3, u * 2, u * 3, u * 5, p); c.drawLine(u * 3, u * 5, s.toFloat(), u * 5, p)
+                c.drawLine(u * 5, 0f, u * 5, u * 2, p)
+                p.style = Paint.Style.FILL; p.color = withAlpha(a, 0x70)
+                c.drawCircle(u * 3, u * 2, u * 0.35f, p); c.drawCircle(u * 5, u * 2, u * 0.35f, p); c.drawCircle(u * 3, u * 5, u * 0.35f, p)
+                b
+            }
+            4 -> {
+                val r = dp(10).toFloat(); val w = Math.round(r * 1.732f).coerceAtLeast(8); val h = Math.round(r * 3f).coerceAtLeast(12)
+                val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888); val c = Canvas(b)
+                p.style = Paint.Style.STROKE; p.strokeWidth = maxOf(1f, r * 0.1f); p.color = withAlpha(a, 0x38)
+                val path = Path()
+                fun hex(cx: Float, cy: Float) {
+                    path.reset()
+                    for (i in 0..5) {
+                        val ang = Math.toRadians(60.0 * i - 30)
+                        val x = cx + (r * Math.cos(ang)).toFloat(); val y = cy + (r * Math.sin(ang)).toFloat()
+                        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                    }
+                    path.close(); c.drawPath(path, p)
+                }
+                val fw = w.toFloat()
+                hex(fw / 2, r); hex(0f, r * 2.5f); hex(fw, r * 2.5f); hex(0f, -r * 0.5f); hex(fw, -r * 0.5f)
+                b
+            }
+            5 -> {
+                val s = dp(24).coerceAtLeast(12)
+                val b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888); val c = Canvas(b)
+                p.style = Paint.Style.STROKE; p.strokeWidth = 1f; p.color = 0x16FFFFFF
+                c.drawLine(0f, 0f, s.toFloat(), 0f, p); c.drawLine(0f, 0f, 0f, s.toFloat(), p)
+                p.strokeWidth = maxOf(2f, s * 0.08f); p.color = withAlpha(a, 0x80)
+                c.drawLine(0f, 0f, s * 0.22f, 0f, p); c.drawLine(0f, 0f, 0f, s * 0.22f, p)
+                b
+            }
+            else -> {
+                val s = dp(14).coerceAtLeast(8)
+                val b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888); val c = Canvas(b)
+                p.style = Paint.Style.STROKE; p.strokeCap = Paint.Cap.ROUND; p.strokeJoin = Paint.Join.ROUND
+                p.strokeWidth = maxOf(1.5f, s * 0.12f); p.color = withAlpha(a, 0x34)
+                val path = Path(); path.moveTo(s * 0.3f, s * 0.2f); path.lineTo(s * 0.68f, s * 0.5f); path.lineTo(s * 0.3f, s * 0.8f)
+                c.drawPath(path, p)
+                b
+            }
         }
-        b
     }
  
     private fun glass(focused: Boolean, radius: Int): Drawable {
@@ -1284,7 +1371,7 @@ class MainActivity : Activity() {
             }, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
             Thread { val b = decodeThumb(w.file); runOnUiThread { if (b != null) img.setImageBitmap(b) } }.start()
             r.addView(focusable(f, 18, { prefs.edit().putInt("wall", i).apply(); loadWall(w, true) }, null, img, 1.08f),
-                LinearLayout.LayoutParams(dp(200), dp(112)).apply { rightMargin = dp(12) })
+                LinearLayout.LayoutParams(dp(176), dp(100)).apply { rightMargin = dp(12) })
         }
         return r
     }
@@ -1520,132 +1607,380 @@ class MainActivity : Activity() {
  
     private fun build() {
         when (prefs.getInt("layout", 0) % 3) {
-            1 -> { buildDock(); return }
-            2 -> { buildConsole(); return }
+            1 -> buildDock()
+            2 -> buildMosaic()
+            else -> buildCine()
         }
+    }
+ 
+    private fun resetRefs() {
+        ramG = null; diskG = null; netG = null; tempG = null; statusRow = null; weatherView = null
+        mediaBox = null; heroBox = null; clusterV = null; segV = null; sportV = null; orbV = null; wxIcon = null
+        sysInfo = null; wxBig = null; wxDesc2 = null; wxDetail = null; wxTom = null; indicators.clear()
+        miniV = null; tickerView = null; heroSyn = null
+        carouselTask?.let { handler.removeCallbacks(it) }; carouselTask = null
+    }
+ 
+    // ---------- fechas importantes y eventos de hoy ----------
+    private fun nthWeekday(year: Int, month: Int, dow: Int, n: Int): Int {
+        val c = Calendar.getInstance(); c.clear(); c.set(year, month, 1)
+        var cnt = 0
+        for (d in 1..31) {
+            c.set(Calendar.DAY_OF_MONTH, d)
+            if (c.get(Calendar.MONTH) != month) break
+            if (c.get(Calendar.DAY_OF_WEEK) == dow) { cnt++; if (cnt == n) return d }
+        }
+        return 1
+    }
+ 
+    private fun easter(y: Int): Calendar {
+        val a = y % 19; val b = y / 100; val c = y % 100; val d = b / 4; val e = b % 4; val f = (b + 8) / 25
+        val g = (b - f + 1) / 3; val h = (19 * a + b - d - g + 15) % 30; val i = c / 4; val k = c % 4
+        val l = (32 + 2 * e + 2 * i - h - k) % 7; val m = (a + 11 * h + 22 * l) / 451
+        val month = (h + l - 7 * m + 114) / 31; val day = ((h + l - 7 * m + 114) % 31) + 1
+        return Calendar.getInstance().apply { clear(); set(y, month - 1, day) }
+    }
+ 
+    private fun eventName(c: Calendar): String? {
+        val y = c.get(Calendar.YEAR); val m = c.get(Calendar.MONTH) + 1; val d = c.get(Calendar.DAY_OF_MONTH)
+        val fixed: String? = when (m * 100 + d) {
+            101 -> "Año Nuevo"
+            106 -> "Día de Reyes"
+            202 -> "Día de la Candelaria"
+            214 -> "San Valentín"
+            422 -> "Día de la Tierra"
+            430 -> "Día del Niño"
+            501 -> "Día del Trabajo"
+            505 -> "Batalla de Puebla"
+            510 -> "Día de las Madres"
+            515 -> "Día del Maestro"
+            915 -> "Grito de Independencia"
+            916 -> "Día de la Independencia"
+            1012 -> "Día de la Raza"
+            1031 -> "Halloween"
+            1101 -> "Día de Todos los Santos"
+            1102 -> "Día de Muertos"
+            1212 -> "Día de la Virgen de Guadalupe"
+            1224 -> "Nochebuena"
+            1225 -> "Navidad"
+            1231 -> "Fin de año"
+            else -> null
+        }
+        if (fixed != null) return fixed
+        if (m == 2 && d == nthWeekday(y, 1, Calendar.MONDAY, 1)) return "Día de la Constitución"
+        if (m == 3 && d == nthWeekday(y, 2, Calendar.MONDAY, 3)) return "Natalicio de Benito Juárez"
+        if (m == 6 && d == nthWeekday(y, 5, Calendar.SUNDAY, 3)) return "Día del Padre"
+        if (m == 11 && d == nthWeekday(y, 10, Calendar.MONDAY, 3)) return "Día de la Revolución"
+        val diff = c.get(Calendar.DAY_OF_YEAR) - easter(y).get(Calendar.DAY_OF_YEAR)
+        return when (diff) { -3 -> "Jueves Santo"; -2 -> "Viernes Santo"; 0 -> "Domingo de Pascua"; else -> null }
+    }
+ 
+    private fun reminders(): List<Triple<Int, Int, String>> {
+        val out = ArrayList<Triple<Int, Int, String>>()
+        val src = ArrayList<String>(getSet("remind"))
+        val f = File(getExternalFilesDir(null), "fechas.txt")
+        if (f.exists()) src.addAll(readLinesRobust(f))
+        val re = Regex("^(\\d{1,2})/(\\d{1,2})\\s+(.+)$")
+        for (l in src) {
+            val m = re.find(l.trim()) ?: continue
+            out.add(Triple(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3]))
+        }
+        return out
+    }
+ 
+    private fun todayNote(): String {
+        val now = Calendar.getInstance()
+        val rem = reminders()
+        fun nameOn(c: Calendar): String? {
+            val parts = ArrayList<String>()
+            eventName(c)?.let { parts.add(it) }
+            for (r in rem) if (r.first == c.get(Calendar.DAY_OF_MONTH) && r.second == c.get(Calendar.MONTH) + 1) parts.add(r.third)
+            return if (parts.isEmpty()) null else parts.joinToString(" · ")
+        }
+        nameOn(now)?.let { return "HOY · $it" }
+        for (i in 1..45) {
+            val c = (now.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, i) }
+            val n = nameOn(c)
+            if (n != null) return if (i == 1) "MAÑANA · $n" else "EN $i DÍAS · $n"
+        }
+        return "Sin fechas especiales próximas"
+    }
+ 
+    private fun askReminder() {
+        val et = EditText(this).apply { hint = "25/12 Cumpleaños de mamá"; isSingleLine = true }
+        AlertDialog.Builder(this).setTitle("Nueva fecha importante").setMessage("Escribe día/mes y el nombre.").setView(et)
+            .setPositiveButton("Guardar") { _, _ ->
+                val t = et.text.toString().trim()
+                if (Regex("^\\d{1,2}/\\d{1,2}\\s+.+$").matches(t)) { putSet("remind", getSet("remind") + t); rebuildTicker(); toast("Guardada") }
+                else toast("Formato: 25/12 Nombre")
+            }
+            .setNegativeButton("Cancelar", null).show()
+    }
+ 
+    private fun rebuildTicker() {
+        val items = ArrayList<String>()
+        items.add(todayNote())
+        if (flag("wg_events")) items.addAll(sportsItems)
+        tickerItems = items; tickerIdx = 0
+        tickerView?.text = items[0]
+    }
+ 
+    private val tickerTask = object : Runnable {
+        override fun run() {
+            val tv = tickerView
+            if (tv != null && tickerItems.size > 1) {
+                tickerIdx = (tickerIdx + 1) % tickerItems.size
+                val txt = tickerItems[tickerIdx]
+                tv.animate().alpha(0f).setDuration(250).withEndAction { tv.text = txt; tv.animate().alpha(1f).setDuration(250).start() }.start()
+            }
+            handler.postDelayed(this, 5500)
+        }
+    }
+ 
+    private fun fetchEvents() {
+        lastEv = System.currentTimeMillis()
+        Thread {
+            val out = ArrayList<String>()
+            val leagues = listOf(Pair("soccer/mex.1", "LIGA MX"), Pair("soccer/uefa.champions", "CHAMPIONS"), Pair("soccer/esp.1", "LALIGA"),
+                Pair("soccer/eng.1", "PREMIER"), Pair("football/nfl", "NFL"), Pair("basketball/nba", "NBA"), Pair("baseball/mlb", "MLB"))
+            val f1 = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm'Z'", Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+            val f2 = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+            val hm = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
+            val dayF = java.text.SimpleDateFormat("yyyyMMdd", Locale.US)
+            val todayKey = dayF.format(java.util.Date())
+            for (lg in leagues) {
+                try {
+                    val evs = JSONObject(httpGet("https://site.api.espn.com/apis/site/v2/sports/${lg.first}/scoreboard")).optJSONArray("events") ?: continue
+                    for (i in 0 until evs.length()) {
+                        val e = evs.getJSONObject(i)
+                        val cs = e.getJSONArray("competitions").getJSONObject(0).getJSONArray("competitors")
+                        var home = ""; var away = ""; var hs = ""; var asc = ""
+                        for (k in 0 until cs.length()) {
+                            val cc = cs.getJSONObject(k); val tm = cc.getJSONObject("team")
+                            val nm = tm.optString("shortDisplayName", tm.optString("displayName"))
+                            if (cc.optString("homeAway") == "home") { home = nm; hs = cc.optString("score") } else { away = nm; asc = cc.optString("score") }
+                        }
+                        val state = e.getJSONObject("status").getJSONObject("type").optString("state")
+                        val ds = e.optString("date")
+                        val dt = try { f1.parse(ds) } catch (ex: Exception) { try { f2.parse(ds) } catch (ex2: Exception) { null } }
+                        if (dt != null && dayF.format(dt) != todayKey) continue
+                        val txt = when (state) {
+                            "in" -> "${lg.second} · EN VIVO · $home $hs-$asc $away"
+                            "post" -> "${lg.second} · FINAL · $home $hs-$asc $away"
+                            else -> "${lg.second} · $home vs $away" + (if (dt != null) " · ${hm.format(dt)}" else "")
+                        }
+                        if (state == "in") out.add(0, txt) else out.add(txt)
+                    }
+                } catch (ex: Exception) { }
+            }
+            sportsItems = out.take(12)
+            runOnUiThread { rebuildTicker() }
+        }.start()
+    }
+ 
+    // ---------- barra superior unificada ----------
+    private inner class WeekStrip(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val rect = RectF()
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat(); val cw = w / 7
+            val todayIdx = (Calendar.getInstance().get(Calendar.DAY_OF_WEEK) + 5) % 7
+            val names = arrayOf("L", "M", "X", "J", "V", "S", "D")
+            for (i in 0..6) {
+                val cx = cw * i + cw / 2; val on = i == todayIdx
+                if (on) {
+                    rect.set(cx - cw * 0.46f, 0f, cx + cw * 0.46f, h)
+                    p.style = Paint.Style.FILL; p.color = withAlpha(skin.accent, 0x38); c.drawRoundRect(rect, dp(9).toFloat(), dp(9).toFloat(), p)
+                    p.style = Paint.Style.STROKE; p.strokeWidth = dp(2).toFloat(); p.color = skin.accent; c.drawRoundRect(rect, dp(9).toFloat(), dp(9).toFloat(), p)
+                }
+                val dayNum = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, i - todayIdx) }.get(Calendar.DAY_OF_MONTH)
+                p.style = Paint.Style.FILL; p.textAlign = Paint.Align.CENTER
+                p.typeface = body(); p.textSize = h * 0.28f; p.color = if (on) skin.accent else 0xFFB0A9BC.toInt()
+                c.drawText(names[i], cx, h * 0.38f, p)
+                p.typeface = Typeface.DEFAULT_BOLD; p.textSize = h * 0.32f; p.color = if (on) Color.WHITE else 0xFFD6D0E0.toInt()
+                c.drawText("$dayNum", cx, h * 0.84f, p)
+            }
+            postInvalidateDelayed(60000)
+        }
+    }
+ 
+    private fun shareScreen() {
+        val ok = listOf("com.homwee.multiscreenshare", "com.homwee.mmp.screenshare").firstOrNull { goPkg(it) }
+        if (ok == null) toast("No disponible en esta TV")
+    }
+ 
+    private fun actionList(): List<Triple<Int, String, () -> Unit>> = listOf(
+        Triple(0, "Entrada", { inputPanel() }),
+        Triple(1, "Compartir pantalla", { shareScreen() }),
+        Triple(2, "Asistente", { assistantPanel() }),
+        Triple(3, "Paneles", { panelsOverlay() }),
+        Triple(6, "Siguiente fondo", { nextWall() }),
+        Triple(4, "Optimizar", { optimize() }),
+        Triple(5, "Ajustes", { customPanel() })
+    )
+ 
+    // botón de solo icono: al seleccionarlo aparece su nombre
+    private fun iconBtn(kind: Int, label: String, onClick: () -> Unit): View {
+        val v = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(5), dp(4), dp(5), dp(4)) }
+        val cb = CircleBtn(this, kind)
+        v.addView(cb, LinearLayout.LayoutParams(dp(30), dp(30)))
+        val lb = TextView(this).apply {
+            text = label; textSize = 13f; typeface = body(); setTextColor(Color.WHITE); setPadding(dp(8), 0, dp(6), 0); visibility = View.GONE
+        }
+        v.addView(lb)
+        return focusable(v, 22, onClick, null, cb, 1.12f) { f -> lb.visibility = if (f) View.VISIBLE else View.GONE }
+    }
+ 
+    private fun buttonsRow(): View {
+        val r = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        for (a in actionList()) r.addView(iconBtn(a.first, a.second, a.third), LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(2) })
+        return r
+    }
+ 
+    private fun sideRail(): View {
+        val r = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(6), dp(8), dp(6), dp(8)); background = dark(26) }
+        for (a in actionList()) r.addView(iconBtn(a.first, a.second, a.third), LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(4) })
+        return r
+    }
+ 
+    private fun topBar(showClock: Boolean): View {
+        val bs = prefs.getInt("bar", 0) % 3
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(28), dp(6), dp(28), dp(4))
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x99000000.toInt(), 0x00000000))
+        }
+        val row1 = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        row1.addView(WeekStrip(this), LinearLayout.LayoutParams(dp(196), dp(40)))
+        if (prefs.getInt("btnpos", 0) % 2 == 0) row1.addView(buttonsRow(), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(14) })
+        else row1.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        val wxs = prefs.getInt("wxs", 0) % 4
+        if (flag("wg_weather") && wxs != 3) {
+            if (wxs == 1) { wxIcon = WxIcon(this); row1.addView(wxIcon, LinearLayout.LayoutParams(dp(26), dp(26)).apply { rightMargin = dp(6) }) }
+            weatherView = TextView(this).apply {
+                textSize = if (wxs == 1) 19f else 16f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK)
+            }
+            row1.addView(weatherView, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(14) })
+        }
+        if (showClock) row1.addView(clockView())
+        col.addView(row1)
+        if (bs != 2) {
+            val row2 = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(2), dp(2), 0, 0) }
+            val tv = TextView(this).apply {
+                textSize = 12.5f; typeface = body(); setTextColor(0xFFE6E0F0.toInt()); maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END; setShadowLayer(4f, 0f, 1f, Color.BLACK)
+            }
+            tickerView = tv
+            row2.addView(tv, LinearLayout.LayoutParams(0, WRAP, 1f))
+            row2.addView(indicatorRow(20), LinearLayout.LayoutParams(WRAP, WRAP))
+            col.addView(row2, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+        if (bs == 1) {
+            val sb = SportBar(this); sportV = sb; sb.setBackgroundColor(0x66000000)
+            col.addView(sb, LinearLayout.LayoutParams(MATCH, dp(40)).apply { topMargin = dp(4) })
+        }
+        return col
+    }
+ 
+    // ---------- widgets compartidos por todos los diseños ----------
+    private fun gaugeCard(): LinearLayout? {
+        if (!flag("wg_gauges") && !flag("wg_status")) return null
+        val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(8)); background = dark(26) }
+        if (flag("wg_gauges")) {
+            val gs = prefs.getInt("gstyle", 0) % 5
+            if (gs == 2) { clusterV = ClusterView(this); card.addView(clusterV, LinearLayout.LayoutParams(dp(300), dp(150))) }
+            else if (gs == 4) { orbV = OrbitalView(this, false); card.addView(orbV, LinearLayout.LayoutParams(dp(330), dp(140))) }
+            else if (gs == 3) { segV = SegView(this); card.addView(segV, LinearLayout.LayoutParams(dp(300), dp(124))) }
+            else {
+                val g = LinearLayout(this)
+                ramG = gauge("RAM"); diskG = gauge("DISCO"); tempG = gauge("TEMP"); netG = gauge("RED")
+                listOf(ramG!!, diskG!!, tempG!!, netG!!).forEach { g.addView(it, LinearLayout.LayoutParams(dp(74), dp(74))) }
+                card.addView(g)
+            }
+        }
+        if (flag("wg_status")) {
+            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_HORIZONTAL; setPadding(0, dp(2), 0, 0) }
+            statusRow = row; card.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+        return card
+    }
+ 
+    // un solo panel que rota entre los widgets extra que tengas activados
+    private fun extrasCarousel(): View? {
+        val list = extraWidgets().filter { opt(it.first) }
+        if (list.isEmpty()) return null
+        val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(8), dp(14), dp(10)); background = dark(24) }
+        val title = TextView(this).apply { textSize = 12f; letterSpacing = 0.2f; typeface = body(); setTextColor(skin.accent); setPadding(0, 0, 0, dp(4)) }
+        val holder = FrameLayout(this)
+        card.addView(title); card.addView(holder, LinearLayout.LayoutParams(dp(300), dp(200)))
+        var idx = 0
+        fun show() {
+            holder.removeAllViews(); holder.addView(list[idx].third(), FrameLayout.LayoutParams(WRAP, WRAP))
+            title.text = list[idx].second.uppercase() + (if (list.size > 1) "    ${idx + 1}/${list.size}" else "")
+        }
+        show()
+        if (list.size == 1) return card
+        val t = object : Runnable {
+            override fun run() {
+                idx = (idx + 1) % list.size
+                holder.animate().alpha(0f).setDuration(200).withEndAction { show(); holder.animate().alpha(1f).setDuration(250).start() }.start()
+                handler.postDelayed(this, 9000)
+            }
+        }
+        carouselTask = t; handler.postDelayed(t, 9000)
+        return focusable(card, 24, { idx = (idx + 1) % list.size; show() })
+    }
+ 
+    // mode 0: medidores completos; 1: solo estado; 2: nada de medidores
+    private fun widgetStack(mode: Int): LinearLayout {
+        val st = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun gap() = LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(8) }
+        if (mode == 0) gaugeCard()?.let { st.addView(it, gap()) }
+        else if (mode == 1 && flag("wg_status")) {
+            val card = LinearLayout(this).apply { setPadding(dp(12), dp(8), dp(12), dp(8)); background = dark(24) }
+            val row = LinearLayout(this); statusRow = row; card.addView(row); st.addView(card, gap())
+        }
+        if (flag("wg_media")) st.addView(mediaCard(), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+        extrasCarousel()?.let { st.addView(it, LinearLayout.LayoutParams(MATCH, WRAP)) }
+        return st
+    }
+ 
+    private fun finishRoot(root: FrameLayout, hudGravity: Int, hud: Boolean, focus: View?) {
+        addOverlays(root, hudGravity, hud)
+        val fx = seasonFx()
+        if (fx.isNotEmpty()) root.addView(SeasonView(this, fx), FrameLayout.LayoutParams(MATCH, MATCH))
+        if (!splashShown && flag("splash")) { splashShown = true; root.addView(splashView(), FrameLayout.LayoutParams(MATCH, MATCH)) }
+        sfxReady = false; handler.postDelayed({ sfxReady = true }, 900)
+        setContentView(root)
+        focus?.requestFocus()
+        updateCaption(); refreshStats(); renderWeather(); rebuildTicker()
+        if (flag("wg_weather") && System.currentTimeMillis() - lastWx > 5 * 60_000L) fetchWeather()
+    }
+ 
+    // ---------- diseño Cine ----------
+    private fun buildCine() {
         val hidden = getSet("hidden"); val favs = getSet("fav")
         val visible = apps().filter { it.activityInfo.packageName !in hidden }
         val favApps = visible.filter { it.activityInfo.packageName in favs }
         val restApps = visible.filter { it.activityInfo.packageName !in favs }
         val s = scale
-        val tileW = dp((168 * s).toInt()); val tileH = dp((124 * s).toInt())
-        ramG = null; diskG = null; netG = null; tempG = null; statusRow = null; weatherView = null
-        mediaBox = null; heroBox = null; clusterV = null; segV = null; sportV = null; orbV = null; wxIcon = null
-        sysInfo = null; wxBig = null; wxDesc2 = null; wxDetail = null; wxTom = null; indicators.clear()
+        val tileW = dp((144 * s).toInt()); val tileH = dp((104 * s).toInt())
+        resetRefs()
+        val root = baseRoot(intArrayOf(0x55000000, 0x11000000, 0xE6000000.toInt()))
+        val railOn = prefs.getInt("btnpos", 0) % 2 == 1
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(if (railOn) dp(54) else 0, 0, 0, 0) }
+        col.addView(topBar(true), LinearLayout.LayoutParams(MATCH, WRAP))
  
-        val root = FrameLayout(this).apply {
-            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(skin.top, skin.bottom))
-        }
-        wallLayer = FrameLayout(this)
-        wallBlur = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; visibility = View.GONE }
-        wallView = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
-        wallLayer!!.addView(wallBlur, FrameLayout.LayoutParams(MATCH, MATCH))
-        wallLayer!!.addView(wallView, FrameLayout.LayoutParams(MATCH, MATCH))
-        root.addView(wallLayer, FrameLayout.LayoutParams(MATCH, MATCH))
-        root.addView(View(this).apply {
-            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x55000000, 0x11000000, 0xE6000000.toInt()))
-        }, FrameLayout.LayoutParams(MATCH, MATCH))
         val ws = walls()
-        if (wallBmp != null) applyWall(false)
-        else if (ws.isNotEmpty()) loadWall(ws[prefs.getInt("wall", 0).coerceIn(0, ws.size - 1)], false)
+        val hero = FrameLayout(this).apply { minimumHeight = (resources.displayMetrics.heightPixels * 0.28f).toInt() }
+        hero.addView(makeHero(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START))
+        val st = widgetStack(0)
+        if (st.childCount > 0) hero.addView(st, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.END or Gravity.CENTER_VERTICAL).apply { rightMargin = dp(28) })
  
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
- 
-        // barra superior: botones a la izquierda, fecha, clima y hora a la derecha
-        val bar = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(36), dp(6), dp(36), dp(6)); setBackgroundColor(0x77000000)
-        }
-        val chips = LinearLayout(this)
-        fun gap() = LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(10) }
-        chips.addView(chip("Entrada") { inputPanel() }, gap())
-        chips.addView(chip("Compartir") {
-            val ok = listOf("com.homwee.multiscreenshare", "com.homwee.mmp.screenshare").firstOrNull { goPkg(it) }
-            if (ok == null) toast("No disponible en esta TV")
-        }, gap())
-        chips.addView(chip("Asistente") { assistantPanel() }, gap())
-        chips.addView(chip("Paneles") { panelsOverlay() }, gap())
-        chips.addView(chip("Personalizar") { customPanel() }, gap())
-        chips.addView(chip("Optimizar") { optimize() }, gap())
-        bar.addView(HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(dp(4), dp(6), dp(4), dp(6)); addView(chips)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        val wxs = prefs.getInt("wxs", 0) % 4
-        if (flag("wg_weather") && wxs != 3) {
-            if (wxs == 1) { wxIcon = WxIcon(this); bar.addView(wxIcon, LinearLayout.LayoutParams(dp(28), dp(28)).apply { rightMargin = dp(6) }) }
-            weatherView = TextView(this).apply {
-                textSize = if (wxs == 1) 20f else 17f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK)
-            }
-            bar.addView(weatherView, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(16) })
-        }
-        bar.addView(clockView(), LinearLayout.LayoutParams(WRAP, WRAP))
-        val bs = prefs.getInt("bar", 0) % 3
-        if (bs >= 1) {
-            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-            for (k in 0..6) {
-                val iv = IndicatorView(this, k); indicators.add(iv)
-                row.addView(iv, LinearLayout.LayoutParams(dp(28), dp(28)).apply { rightMargin = dp(8) })
-            }
-            bar.addView(row, 1, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(10); rightMargin = dp(14) })
-        }
-        if (bs == 1) bar.addView(TextClock(this).apply {
-            format24Hour = "ss"; format12Hour = "ss"; textSize = 15f; setTextColor(skin.accent)
-        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(4) })
-        col.addView(bar, LinearLayout.LayoutParams(MATCH, WRAP))
-        if (bs == 2) {
-            sportV = SportBar(this)
-            col.addView(sportV, LinearLayout.LayoutParams(MATCH, dp(48)).apply { })
-            sportV!!.setBackgroundColor(0x77000000)
-        }
- 
-        // portada: título de cartelera a la izquierda, widgets a la derecha
-        val hero = FrameLayout(this).apply { minimumHeight = (resources.displayMetrics.heightPixels * 0.40f).toInt() }
-        val hb = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(40), 0, dp(24), dp(14)); visibility = View.GONE
-        }
-        heroBox = hb
-        heroProv = TextView(this).apply {
-            textSize = 14f; letterSpacing = 0.25f; setTextColor(skin.accent); setShadowLayer(6f, 0f, 2f, Color.BLACK)
-        }
-        heroTitle = TextView(this).apply {
-            textSize = 38f; typeface = disp(); setTextColor(Color.WHITE)
-            maxLines = 2; setShadowLayer(12f, 0f, 3f, Color.BLACK)
-        }
-        val btn = chip("Ver") { captionAction() }
-        heroBtn = btn as TextView
-        hb.addView(heroProv); hb.addView(heroTitle, LinearLayout.LayoutParams(dp(460), WRAP))
-        hb.addView(btn, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(12) })
-        hero.addView(hb, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START))
- 
-        val side = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(10), dp(36), dp(10)) }
-        if (flag("wg_gauges") || flag("wg_status")) {
-            val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(8)); background = dark(26) }
-            if (flag("wg_gauges")) {
-                val gs = prefs.getInt("gstyle", 0) % 5
-                if (gs == 2) { clusterV = ClusterView(this); card.addView(clusterV, LinearLayout.LayoutParams(dp(300), dp(150))) }
-                else if (gs == 4) { orbV = OrbitalView(this, false); card.addView(orbV, LinearLayout.LayoutParams(dp(330), dp(140))) }
-                else if (gs == 3) { segV = SegView(this); card.addView(segV, LinearLayout.LayoutParams(dp(300), dp(124))) }
-                else {
-                    val g = LinearLayout(this)
-                    ramG = gauge("RAM"); diskG = gauge("DISCO"); tempG = gauge("TEMP"); netG = gauge("RED")
-                    listOf(ramG!!, diskG!!, tempG!!, netG!!).forEach { g.addView(it, LinearLayout.LayoutParams(dp(78), dp(78))) }
-                    card.addView(g)
-                }
-            }
-            if (flag("wg_status")) {
-                statusRow = LinearLayout(this).apply { gravity = Gravity.CENTER_HORIZONTAL; setPadding(0, dp(2), 0, 0) }
-                card.addView(statusRow, LinearLayout.LayoutParams(MATCH, WRAP))
-            }
-            side.addView(card, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
-        }
-        if (flag("wg_media")) side.addView(mediaCard(), LinearLayout.LayoutParams(MATCH, WRAP))
-        if (side.childCount > 0) hero.addView(side, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.END or Gravity.CENTER_VERTICAL))
- 
-        // estantes
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(hero, LinearLayout.LayoutParams(MATCH, WRAP))
-        val shelves = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(36), 0, dp(36), 0) }
+        val shelves = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(28), 0, dp(28), 0) }
+        var first: View? = null
         if (ws.isNotEmpty()) shelves.addView(shelf(if (prefs.getInt("wallmode", 0) == 1) "Cartelera" else "Mis fondos", hrow(thumbRow(ws))))
-        if (flag("wg_info")) shelves.addView(shelf("Información", hrow(infoRow())))
         if (favApps.isEmpty()) {
             shelves.addView(shelf("Favoritas", TextView(this).apply {
                 text = "Mantén pulsado OK sobre una app para fijarla aquí"
@@ -1653,12 +1988,16 @@ class MainActivity : Activity() {
             }))
         } else {
             val r = LinearLayout(this)
-            favApps.forEach { r.addView(wideTile(it), LinearLayout.LayoutParams(dp((240 * s).toInt()), dp((135 * s).toInt())).apply { rightMargin = dp(14) }) }
+            favApps.forEach {
+                val t = wideTile(it); if (first == null) first = t
+                r.addView(t, LinearLayout.LayoutParams(dp((204 * s).toInt()), dp((115 * s).toInt())).apply { rightMargin = dp(12) })
+            }
             shelves.addView(shelf("Favoritas", hrow(r)))
         }
         val grid = GridLayout(this).apply { orientation = GridLayout.VERTICAL; rowCount = 2 }
         restApps.forEach {
-            grid.addView(appTile(it), GridLayout.LayoutParams().apply { width = tileW; height = tileH; setMargins(dp(6), dp(6), dp(6), dp(6)) })
+            val t = appTile(it); if (first == null) first = t
+            grid.addView(t, GridLayout.LayoutParams().apply { width = tileW; height = tileH; setMargins(dp(5), dp(5), dp(5), dp(5)) })
         }
         shelves.addView(shelf("Todas las apps", hrow(grid)))
         content.addView(shelves, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -1666,23 +2005,12 @@ class MainActivity : Activity() {
             content.alpha = 0f; content.translationY = dp(24).toFloat()
             content.animate().alpha(1f).translationY(0f).setDuration(450).start()
         }
- 
         col.addView(ScrollView(this).apply {
             isVerticalScrollBarEnabled = false; clipToPadding = false; setPadding(0, 0, 0, dp(56)); addView(content)
         }, LinearLayout.LayoutParams(MATCH, 0, 1f))
- 
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
-        addOverlays(root, Gravity.BOTTOM or Gravity.END, true)
-        val fx = seasonFx()
-        if (fx.isNotEmpty()) root.addView(SeasonView(this, fx), FrameLayout.LayoutParams(MATCH, MATCH))
-        if (!splashShown && flag("splash")) { splashShown = true; root.addView(splashView(), FrameLayout.LayoutParams(MATCH, MATCH)) }
-        sfxReady = false; handler.postDelayed({ sfxReady = true }, 900)
-        setContentView(root)
-        chips.getChildAt(0)?.requestFocus()
-        updateCaption()
-        refreshStats()
-        renderWeather()
-        if (flag("wg_weather")) { lastWx = 0L; fetchWeather() }
+        if (railOn) root.addView(sideRail(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply { leftMargin = dp(8) })
+        finishRoot(root, Gravity.BOTTOM or Gravity.END, true, first)
     }
  
     private fun infoRow(): View {
@@ -1701,7 +2029,7 @@ class MainActivity : Activity() {
         sy.addView(sysInfo)
         sy.addView(chip("Optimizar ahora") { optimize() })
         r.addView(sy, LinearLayout.LayoutParams(dp(300), WRAP).apply { rightMargin = dp(14) })
-        for (e in extraWidgets()) if (opt(e.first)) r.addView(widgetCard(e.second, e.third()), LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(14) })
+        wxT?.let { wxBig?.text = "$it°"; wxDesc2?.text = wxDescS; wxDetail?.text = wxDetailS; wxTom?.text = wxTomS }
         return r
     }
  
@@ -1768,24 +2096,29 @@ class MainActivity : Activity() {
         return root
     }
  
-    private fun indicatorRow(): LinearLayout {
+    private fun indicatorRow(size: Int = 28): LinearLayout {
         val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         for (k in 0..6) {
             val iv = IndicatorView(this, k); indicators.add(iv)
-            row.addView(iv, LinearLayout.LayoutParams(dp(28), dp(28)).apply { rightMargin = dp(8) })
+            row.addView(iv, LinearLayout.LayoutParams(dp(size), dp(size)).apply { rightMargin = dp(6) })
         }
         return row
     }
  
     private fun makeHero(): LinearLayout {
-        val hb = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(44), 0, dp(24), 0); visibility = View.GONE }
+        val hb = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(28), 0, dp(20), 0); visibility = View.GONE }
         heroBox = hb
-        heroProv = TextView(this).apply { textSize = 14f; letterSpacing = 0.25f; setTextColor(skin.accent); setShadowLayer(6f, 0f, 2f, Color.BLACK) }
-        heroTitle = TextView(this).apply { textSize = 36f; typeface = disp(); setTextColor(Color.WHITE); maxLines = 2; setShadowLayer(12f, 0f, 3f, Color.BLACK) }
+        heroProv = TextView(this).apply { textSize = 13f; letterSpacing = 0.22f; setTextColor(skin.accent); setShadowLayer(6f, 0f, 2f, Color.BLACK) }
+        heroTitle = TextView(this).apply { textSize = 32f; typeface = disp(); setTextColor(Color.WHITE); maxLines = 2; setShadowLayer(12f, 0f, 3f, Color.BLACK) }
+        heroSyn = TextView(this).apply {
+            textSize = 14f; typeface = body(); setTextColor(0xFFE6E0F0.toInt()); maxLines = 3
+            ellipsize = android.text.TextUtils.TruncateAt.END; setShadowLayer(6f, 0f, 2f, Color.BLACK); setPadding(0, dp(6), 0, 0)
+        }
         val btn = chip("Ver") { captionAction() }
         heroBtn = btn as TextView
-        hb.addView(heroProv); hb.addView(heroTitle, LinearLayout.LayoutParams(dp(520), WRAP))
-        hb.addView(btn, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(12) })
+        hb.addView(heroProv); hb.addView(heroTitle, LinearLayout.LayoutParams(dp(460), WRAP))
+        hb.addView(heroSyn, LinearLayout.LayoutParams(dp(460), WRAP))
+        hb.addView(btn, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(10) })
         return hb
     }
  
@@ -1805,9 +2138,9 @@ class MainActivity : Activity() {
         val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(packageManager).toString()
         val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(6), dp(8), dp(6), dp(6)) }
         val iv = ImageView(this).apply { setImageDrawable(ri.loadIcon(packageManager)) }
-        v.addView(iv, LinearLayout.LayoutParams(dp(60), dp(60)))
+        v.addView(iv, LinearLayout.LayoutParams(dp(50), dp(50)))
         v.addView(TextView(this).apply {
-            text = label; textSize = 12f; typeface = body(); setTextColor(Color.WHITE); maxLines = 1
+            text = label; textSize = 11f; typeface = body(); setTextColor(Color.WHITE); maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END; gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0)
         })
         return focusable(v, 26, { goPkg(pkg) }, { appMenu(pkg, label) }, iv, 1.2f)
@@ -1834,77 +2167,84 @@ class MainActivity : Activity() {
         d.setContentView(wrap); d.window?.setLayout(MATCH, MATCH); d.show(); first?.requestFocus()
     }
  
-    // diseño alterno: reloj grande, widget orbital, dock inferior y cajón de apps
+    private inner class MiniDials(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD }
+        private val rect = RectF()
+        private var a = 0f; private var b = 0f; private var d = 0f
+        override fun onMeasure(w: Int, h: Int) { setMeasuredDimension(dp(196), dp(64)) }
+        private fun dial(c: Canvas, cx: Float, cy: Float, r: Float, v: Float, txt: String) {
+            p.style = Paint.Style.FILL; p.color = 0xF2050508.toInt(); c.drawCircle(cx, cy, r, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = r * 0.07f; p.color = withAlpha(skin.accent, 0xCC); c.drawCircle(cx, cy, r * 0.96f, p)
+            p.strokeCap = Paint.Cap.ROUND; p.strokeWidth = r * 0.11f
+            rect.set(cx - r * 0.76f, cy - r * 0.76f, cx + r * 0.76f, cy + r * 0.76f)
+            p.color = 0x33FFFFFF; c.drawArc(rect, 150f, 240f, false, p)
+            p.color = if (v > 0.85f) 0xFFFF3B30.toInt() else skin.accent; c.drawArc(rect, 150f, 240f * v.coerceIn(0.02f, 1f), false, p)
+            val na = Math.toRadians(150.0 + 240.0 * v)
+            p.color = 0xFFFF5A36.toInt(); p.strokeWidth = r * 0.07f
+            c.drawLine(cx, cy, cx + (r * 0.58f * Math.cos(na)).toFloat(), cy + (r * 0.58f * Math.sin(na)).toFloat(), p)
+            p.style = Paint.Style.FILL; p.color = Color.WHITE; c.drawCircle(cx, cy, r * 0.09f, p)
+            tp.textSize = r * 0.3f; tp.color = Color.WHITE; c.drawText(txt, cx, cy + r * 0.74f, tp)
+        }
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            val mid = if (stat.temp >= 0f) stat.temp / 100f else (stat.mbps / 100f).coerceIn(0f, 1f)
+            a = ease(a, stat.ram); b = ease(b, mid); d = ease(d, stat.disk)
+            dial(c, w * 0.19f, h * 0.6f, h * 0.35f, a, "${(stat.ram * 100).toInt()}")
+            dial(c, w * 0.81f, h * 0.6f, h * 0.35f, d, "${(stat.disk * 100).toInt()}")
+            dial(c, w * 0.5f, h * 0.5f, h * 0.48f, b, if (stat.temp >= 0f) "${stat.temp.toInt()}°" else "${stat.mbps.toInt()}M")
+            if (Math.abs(a - stat.ram) > 0.004f || Math.abs(d - stat.disk) > 0.004f || Math.abs(b - mid) > 0.004f) postInvalidateOnAnimation()
+        }
+    }
+ 
+    // diseño Aurora Dock: reloj grande, dock inferior con medidores en el borde
     private fun buildDock() {
         val hidden = getSet("hidden"); val favs = getSet("fav")
         val visible = apps().filter { it.activityInfo.packageName !in hidden }
         val dockApps = visible.filter { it.activityInfo.packageName in favs }.take(7)
-        ramG = null; diskG = null; netG = null; tempG = null; statusRow = null; weatherView = null
-        mediaBox = null; heroBox = null; clusterV = null; segV = null; sportV = null; orbV = null; wxIcon = null
-        sysInfo = null; wxBig = null; wxDesc2 = null; wxDetail = null; wxTom = null; indicators.clear()
+        resetRefs()
         val root = baseRoot(intArrayOf(0x44000000, 0x00000000, 0xCC000000.toInt()))
+        val railOn = prefs.getInt("btnpos", 0) % 2 == 1
+        val content = FrameLayout(this).apply { setPadding(if (railOn) dp(54) else 0, 0, 0, 0) }
+        content.addView(topBar(false), FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
  
         val tl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        tl.addView(TextView(this).apply { text = greetingText(); textSize = 18f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK) })
+        tl.addView(TextView(this).apply { text = greetingText(); textSize = 16f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK) })
         tl.addView(TextClock(this).apply {
-            format24Hour = "HH:mm"; format12Hour = "h:mm"; textSize = 76f; typeface = disp(); setTextColor(Color.WHITE); setShadowLayer(12f, 0f, 3f, Color.BLACK)
+            format24Hour = "HH:mm"; format12Hour = "h:mm"; textSize = 58f; typeface = disp(); setTextColor(Color.WHITE); setShadowLayer(12f, 0f, 3f, Color.BLACK)
         })
         tl.addView(TextClock(this).apply {
-            format24Hour = "EEEE d 'de' MMMM"; format12Hour = "EEEE d 'de' MMMM"; textSize = 18f; typeface = body(); setTextColor(0xFFE6E0F0.toInt())
+            format24Hour = "EEEE d 'de' MMMM"; format12Hour = "EEEE d 'de' MMMM"; textSize = 16f; typeface = body(); setTextColor(0xFFE6E0F0.toInt())
         })
-        if (flag("wg_weather")) {
-            weatherView = TextView(this).apply { textSize = 18f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK); setPadding(0, dp(4), 0, 0) }
-            tl.addView(weatherView)
-        }
-        root.addView(tl, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START).apply { setMargins(dp(44), dp(18), 0, 0) })
+        content.addView(tl, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START).apply { setMargins(dp(32), dp(88), 0, 0) })
+        content.addView(makeHero(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = dp(132) })
+        val st = widgetStack(1)
+        if (st.childCount > 0) content.addView(st, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(92), dp(28), 0) })
  
-        val tr = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
-        tr.addView(indicatorRow(), LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(4) })
-        val chips = LinearLayout(this)
-        fun gap() = LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(10) }
-        chips.addView(chip("Entrada") { inputPanel() }, gap())
-        chips.addView(chip("Compartir") {
-            val ok = listOf("com.homwee.multiscreenshare", "com.homwee.mmp.screenshare").firstOrNull { goPkg(it) }
-            if (ok == null) toast("No disponible en esta TV")
-        }, gap())
-        chips.addView(chip("Asistente") { assistantPanel() }, gap())
-        chips.addView(chip("Paneles") { panelsOverlay() }, gap())
-        chips.addView(chip("Fondo") { nextWall() }, gap())
-        chips.addView(chip("Optimizar") { optimize() }, gap())
-        chips.addView(chip("Personalizar") { customPanel() }, gap())
-        tr.addView(HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(dp(4), dp(6), dp(4), dp(6)); addView(chips)
-        }, LinearLayout.LayoutParams(dp(560), WRAP))
-        if (flag("wg_gauges")) {
-            orbV = OrbitalView(this, true)
-            tr.addView(orbV, LinearLayout.LayoutParams(dp(330), dp(140)).apply { topMargin = dp(8) })
-        }
-        root.addView(tr, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(14), dp(40), 0) })
- 
-        root.addView(makeHero(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = dp(168) })
-        if (flag("wg_media")) root.addView(mediaCard(), FrameLayout.LayoutParams(dp(300), WRAP, Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, dp(40), dp(160)) })
- 
+        val dials = flag("wg_gauges")
         val dock = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = GradientDrawable().apply { cornerRadius = dp(38).toFloat(); setColor(0xC0101018.toInt()); setStroke(dp(1), withAlpha(skin.accent, 0x66)) }
+            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), if (dials) dp(36) else dp(10), dp(12), dp(8))
+            background = GradientDrawable().apply { cornerRadius = dp(34).toFloat(); setColor(0xC8101018.toInt()); setStroke(dp(1), withAlpha(skin.accent, 0x66)) }
         }
-        dockApps.forEach { dock.addView(dockTile(it), LinearLayout.LayoutParams(dp(104), dp(108)).apply { rightMargin = dp(8) }) }
+        var first: View? = null
+        dockApps.forEach {
+            val t = dockTile(it); if (first == null) first = t
+            dock.addView(t, LinearLayout.LayoutParams(dp(88), dp(90)).apply { rightMargin = dp(6) })
+        }
         val gi = GridIcon(this)
         val all = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(6), dp(8), dp(6), dp(6)) }
-        all.addView(gi, LinearLayout.LayoutParams(dp(54), dp(54)))
-        all.addView(TextView(this).apply { text = "Todas"; textSize = 12f; typeface = body(); setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, dp(10), 0, 0) })
-        dock.addView(focusable(all, 26, { drawer() }, null, gi, 1.2f), LinearLayout.LayoutParams(dp(104), dp(108)))
-        root.addView(dock, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(24) })
- 
-        addOverlays(root, Gravity.TOP or Gravity.CENTER_HORIZONTAL, false)
-        val fx = seasonFx()
-        if (fx.isNotEmpty()) root.addView(SeasonView(this, fx), FrameLayout.LayoutParams(MATCH, MATCH))
-        if (!splashShown && flag("splash")) { splashShown = true; root.addView(splashView(), FrameLayout.LayoutParams(MATCH, MATCH)) }
-        sfxReady = false; handler.postDelayed({ sfxReady = true }, 900)
-        setContentView(root)
-        dock.getChildAt(0)?.requestFocus()
-        updateCaption(); refreshStats(); renderWeather()
-        if (flag("wg_weather")) { lastWx = 0L; fetchWeather() }
+        all.addView(gi, LinearLayout.LayoutParams(dp(44), dp(44)))
+        all.addView(TextView(this).apply { text = "Todas"; textSize = 11f; typeface = body(); setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0) })
+        val allBtn = focusable(all, 26, { drawer() }, null, gi, 1.2f)
+        if (first == null) first = allBtn
+        dock.addView(allBtn, LinearLayout.LayoutParams(dp(88), dp(90)))
+        val dockWrap = FrameLayout(this)
+        dockWrap.addView(dock, FrameLayout.LayoutParams(WRAP, WRAP).apply { topMargin = if (dials) dp(32) else 0 })
+        if (dials) { val m = MiniDials(this); miniV = m; dockWrap.addView(m, FrameLayout.LayoutParams(dp(196), dp(64), Gravity.TOP or Gravity.CENTER_HORIZONTAL)) }
+        content.addView(dockWrap, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(12) })
+        root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
+        if (railOn) root.addView(sideRail(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply { leftMargin = dp(8) })
+        finishRoot(root, Gravity.TOP or Gravity.CENTER_HORIZONTAL, false, first)
     }
  
     // ---------- menú de juego (cambios en vivo) ----------
@@ -1936,6 +2276,7 @@ class MainActivity : Activity() {
             gChoice("Temporada", "season", seasonNames),
             gChoice("Tamaño de iconos", "size", sizeNames, 1),
             gChoice("Barra superior", "bar", barNames),
+            gChoice("Posición de botones", "btnpos", arrayOf("Barra superior", "Lateral")),
             gChoice("Reloj", "clk", clkNames),
             gChoice("Clima en la barra", "wxs", wxsNames)
         ) },
@@ -1947,7 +2288,7 @@ class MainActivity : Activity() {
             gSwitch("Clima", "wg_weather"),
             gSwitch("Reproductor", "wg_media"),
             gSwitch("Etiquetas rápidas", "wg_hud"),
-            gSwitch("Fila de información", "wg_info"),
+            gSwitch("Eventos deportivos en la barra", "wg_events"),
             gSwitch("Reloj analógico", "wg_aclock", false),
             gSwitch("Reloj en palabras", "wg_words", false),
             gSwitch("Calendario", "wg_cal", false),
@@ -1988,6 +2329,8 @@ class MainActivity : Activity() {
             gSwitch("Pantalla de bienvenida", "splash"),
             gSwitch("Bienvenida al despertar", "splash_wake"),
             gAction("Probar bienvenida") { replaySplash() },
+            gAction("Nueva fecha importante") { askReminder() },
+            gAction("Borrar fechas propias") { putSet("remind", emptySet()); rebuildTicker() },
             GSetting("Tu nombre", 2, { userName().ifEmpty { "sin definir" } }) { d -> if (d == 0) askName() },
             gChoice("Estilo del menú", "menu", menuNames),
             gChoice("Posición del menú", "menupos", arrayOf("Derecha", "Izquierda")),
@@ -2127,6 +2470,12 @@ class MainActivity : Activity() {
                     path.lineTo(cx - s * 0.06f, cy + s * 0.3f); path.lineTo(cx + s * 0.14f, cy - s * 0.06f); path.lineTo(cx + s * 0.01f, cy - s * 0.06f); path.close()
                     c.drawPath(path, p)
                 }
+                6 -> {
+                    rect.set(cx - s * 0.28f, cy - s * 0.22f, cx + s * 0.28f, cy + s * 0.22f); c.drawRoundRect(rect, s * 0.05f, s * 0.05f, p)
+                    path.reset(); path.moveTo(cx - s * 0.22f, cy + s * 0.16f); path.lineTo(cx - s * 0.06f, cy - s * 0.02f)
+                    path.lineTo(cx + s * 0.04f, cy + s * 0.08f); path.lineTo(cx + s * 0.12f, cy); path.lineTo(cx + s * 0.22f, cy + s * 0.16f); c.drawPath(path, p)
+                    p.style = Paint.Style.FILL; c.drawCircle(cx + s * 0.14f, cy - s * 0.1f, s * 0.04f, p)
+                }
                 else -> {
                     c.drawCircle(cx, cy, s * 0.11f, p)
                     for (i in 0 until 8) {
@@ -2139,101 +2488,57 @@ class MainActivity : Activity() {
         }
     }
  
-    private fun roundBtn(kind: Int, label: String, onClick: () -> Unit): View {
-        val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(10), dp(8), dp(10), dp(6)) }
-        val cb = CircleBtn(this, kind)
-        v.addView(cb, LinearLayout.LayoutParams(dp(48), dp(48)))
-        v.addView(TextView(this).apply { text = label; textSize = 11f; typeface = body(); setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0) })
-        return focusable(v, 30, onClick, null, cb, 1.15f)
-    }
- 
-    private fun consoleTile(ri: ResolveInfo, info: TextView): View {
+    private fun miniTile(ri: ResolveInfo): View {
         val pkg = ri.activityInfo.packageName; val label = ri.loadLabel(packageManager).toString()
-        val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(8), dp(8), dp(8), dp(8)) }
+        val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(4), dp(6), dp(4), dp(4)) }
         val iv = ImageView(this).apply { setImageDrawable(ri.loadIcon(packageManager)) }
-        v.addView(iv, LinearLayout.LayoutParams(dp(76), dp(76)))
-        return focusable(v, 26, { goPkg(pkg) }, { appMenu(pkg, label) }, iv, 1.2f) { f -> if (f) info.text = label }
+        v.addView(iv, LinearLayout.LayoutParams(dp(40), dp(40)))
+        v.addView(TextView(this).apply {
+            text = label; textSize = 10f; typeface = body(); setTextColor(Color.WHITE); maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END; gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
+        })
+        return focusable(v, 18, { goPkg(pkg) }, { appMenu(pkg, label) }, iv, 1.15f)
     }
  
-    private fun buildConsole() {
+    // diseño Mosaico: panel de apps a la izquierda, portada debajo y widgets a la derecha
+    private fun buildMosaic() {
         val hidden = getSet("hidden"); val favs = getSet("fav")
         val visible = apps().filter { it.activityInfo.packageName !in hidden }
-        val favApps = visible.filter { it.activityInfo.packageName in favs }
-        val restApps = visible.filter { it.activityInfo.packageName !in favs }
-        ramG = null; diskG = null; netG = null; tempG = null; statusRow = null; weatherView = null
-        mediaBox = null; heroBox = null; clusterV = null; segV = null; sportV = null; orbV = null; wxIcon = null
-        sysInfo = null; wxBig = null; wxDesc2 = null; wxDetail = null; wxTom = null; indicators.clear()
+        val ordered = visible.filter { it.activityInfo.packageName in favs } + visible.filter { it.activityInfo.packageName !in favs }
+        resetRefs()
         val root = baseRoot(intArrayOf(0x55000000, 0x22000000, 0xDD000000.toInt()))
+        val railOn = prefs.getInt("btnpos", 0) % 2 == 1
+        val content = FrameLayout(this).apply { setPadding(if (railOn) dp(54) else 0, 0, 0, 0) }
+        content.addView(topBar(true), FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
  
-        val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(40), dp(12), dp(40), dp(8)) }
-        val nm = userName()
-        top.addView(TextView(this).apply {
-            text = if (nm.isEmpty()) "•" else nm.substring(0, 1).uppercase(); textSize = 18f; typeface = Typeface.DEFAULT_BOLD
-            setTextColor(0xFF05050A.toInt()); gravity = Gravity.CENTER; background = oval(skin.accent)
-        }, LinearLayout.LayoutParams(dp(40), dp(40)))
-        top.addView(TextView(this).apply {
-            text = greetingText(); textSize = 16f; typeface = body(); setTextColor(Color.WHITE); setShadowLayer(6f, 0f, 2f, Color.BLACK); setPadding(dp(12), 0, 0, 0)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        top.addView(indicatorRow(), LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(18) })
-        if (flag("wg_weather")) {
-            weatherView = TextView(this).apply { textSize = 16f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK) }
-            top.addView(weatherView, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(16) })
-        }
-        top.addView(clockView())
-        root.addView(top, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
- 
-        val info = TextView(this).apply {
-            textSize = 30f; typeface = disp(); setTextColor(Color.WHITE); setShadowLayer(8f, 0f, 2f, Color.BLACK); maxLines = 1; setPadding(dp(8), 0, 0, 0)
-            text = (favApps.firstOrNull() ?: restApps.firstOrNull())?.loadLabel(packageManager)?.toString() ?: ""
-        }
-        val tiles = LinearLayout(this)
-        (favApps + restApps.take(10)).forEach { tiles.addView(consoleTile(it, info), LinearLayout.LayoutParams(dp(132), dp(132)).apply { rightMargin = dp(12) }) }
-        val gi = GridIcon(this)
-        val all = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(8), dp(8), dp(8), dp(8)) }
-        all.addView(gi, LinearLayout.LayoutParams(dp(60), dp(60)))
-        tiles.addView(focusable(all, 26, { drawer() }, null, gi, 1.2f) { f -> if (f) info.text = "Todas las apps" }, LinearLayout.LayoutParams(dp(132), dp(132)))
-        val area = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        area.addView(HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(dp(8), dp(12), dp(8), dp(12)); addView(tiles)
+        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(10), dp(14), dp(10)); background = dark(26) }
+        panel.addView(TextView(this).apply {
+            text = "APPS"; textSize = 12f; letterSpacing = 0.25f; typeface = body(); setTextColor(skin.accent); setPadding(dp(4), 0, 0, dp(4))
         })
-        area.addView(info)
-        area.addView(TextView(this).apply { text = "Mantén OK sobre una app para fijarla u ocultarla"; textSize = 12f; typeface = body(); setTextColor(0xFFD6D0E0.toInt()); setPadding(dp(8), dp(2), 0, 0) })
-        val aw = resources.displayMetrics.widthPixels - dp(40 + 40 + 330)
-        root.addView(area, FrameLayout.LayoutParams(aw, WRAP, Gravity.TOP or Gravity.START).apply { setMargins(dp(32), dp(62), 0, 0) })
- 
-        val rc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        if (flag("wg_gauges")) {
-            val card = LinearLayout(this).apply { setPadding(dp(14), dp(8), dp(14), dp(8)); background = dark(26) }
-            segV = SegView(this); card.addView(segV, LinearLayout.LayoutParams(dp(300), dp(124)))
-            rc.addView(card)
+        val grid = GridLayout(this).apply { columnCount = 6 }
+        var first: View? = null
+        ordered.take(11).forEach {
+            val t = miniTile(it); if (first == null) first = t
+            grid.addView(t, GridLayout.LayoutParams().apply { width = dp(80); height = dp(74); setMargins(dp(3), dp(3), dp(3), dp(3)) })
         }
-        if (flag("wg_media")) rc.addView(mediaCard(), LinearLayout.LayoutParams(dp(328), WRAP).apply { topMargin = dp(10) })
-        root.addView(rc, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(62), dp(36), 0) })
+        val gi = GridIcon(this)
+        val all = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(4), dp(6), dp(4), dp(4)) }
+        all.addView(gi, LinearLayout.LayoutParams(dp(36), dp(36)))
+        all.addView(TextView(this).apply { text = "Todas"; textSize = 10f; typeface = body(); setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
+        val allBtn = focusable(all, 18, { drawer() }, null, gi, 1.15f)
+        if (first == null) first = allBtn
+        grid.addView(allBtn, GridLayout.LayoutParams().apply { width = dp(80); height = dp(74); setMargins(dp(3), dp(3), dp(3), dp(3)) })
+        panel.addView(grid)
+        left.addView(panel, LinearLayout.LayoutParams(WRAP, WRAP))
+        left.addView(makeHero(), LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(12) })
+        content.addView(left, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START).apply { setMargins(dp(24), dp(92), 0, 0) })
  
-        root.addView(makeHero(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = dp(124) })
- 
-        val btns = LinearLayout(this).apply { gravity = Gravity.CENTER; background = dark(38); setPadding(dp(14), dp(4), dp(14), dp(4)) }
-        fun bg() = LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(4); rightMargin = dp(4) }
-        btns.addView(roundBtn(0, "Entrada") { inputPanel() }, bg())
-        btns.addView(roundBtn(1, "Compartir") {
-            val ok = listOf("com.homwee.multiscreenshare", "com.homwee.mmp.screenshare").firstOrNull { goPkg(it) }
-            if (ok == null) toast("No disponible en esta TV")
-        }, bg())
-        btns.addView(roundBtn(2, "Asistente") { assistantPanel() }, bg())
-        btns.addView(roundBtn(3, "Paneles") { panelsOverlay() }, bg())
-        btns.addView(roundBtn(4, "Optimizar") { optimize() }, bg())
-        btns.addView(roundBtn(5, "Ajustes") { customPanel() }, bg())
-        root.addView(btns, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(14) })
- 
-        addOverlays(root, Gravity.TOP or Gravity.CENTER_HORIZONTAL, false)
-        val fx = seasonFx()
-        if (fx.isNotEmpty()) root.addView(SeasonView(this, fx), FrameLayout.LayoutParams(MATCH, MATCH))
-        if (!splashShown && flag("splash")) { splashShown = true; root.addView(splashView(), FrameLayout.LayoutParams(MATCH, MATCH)) }
-        sfxReady = false; handler.postDelayed({ sfxReady = true }, 900)
-        setContentView(root)
-        tiles.getChildAt(0)?.requestFocus()
-        updateCaption(); refreshStats(); renderWeather()
-        if (flag("wg_weather")) { lastWx = 0L; fetchWeather() }
+        val st = widgetStack(0)
+        if (st.childCount > 0) content.addView(st, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(92), dp(24), 0) })
+        root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
+        if (railOn) root.addView(sideRail(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply { leftMargin = dp(8) })
+        finishRoot(root, Gravity.BOTTOM or Gravity.END, true, first)
     }
  
     // ---------- temporadas ----------
@@ -2577,7 +2882,7 @@ class MainActivity : Activity() {
             toggle("wg_weather", "Clima"),
             toggle("wg_media", "Reproductor de música"),
             toggle("wg_hud", "Etiquetas rápidas (RAM 76%)"),
-            toggle("wg_info", "Fila de información (clima y sistema)"),
+            toggle("wg_events", "Eventos deportivos en la barra"),
             toggleOff("wg_aclock", "  Reloj analógico"),
             toggleOff("wg_words", "  Reloj en palabras"),
             toggleOff("wg_cal", "  Calendario"),
@@ -2785,6 +3090,7 @@ class MainActivity : Activity() {
  
     private fun barPanel() {
         panel("Barra y widgets", listOf(
+            Opt("Botones: ${if (prefs.getInt("btnpos", 0) % 2 == 0) "Barra superior" else "Lateral"}") { prefs.edit().putInt("btnpos", prefs.getInt("btnpos", 0) + 1).apply(); build(); barPanel() },
             Opt("Barra superior: ${barNames[prefs.getInt("bar", 0) % 3]}") { prefs.edit().putInt("bar", prefs.getInt("bar", 0) + 1).apply(); build(); barPanel() },
             Opt("Reloj: ${clkNames[prefs.getInt("clk", 0) % 5]}") { prefs.edit().putInt("clk", prefs.getInt("clk", 0) + 1).apply(); build(); barPanel() },
             Opt("Clima en la barra: ${wxsNames[prefs.getInt("wxs", 0) % 4]}") { prefs.edit().putInt("wxs", prefs.getInt("wxs", 0) + 1).apply(); build(); barPanel() },
@@ -2799,6 +3105,7 @@ class MainActivity : Activity() {
  
     private fun customList() {
         panel("Personalizar", listOf(
+            Opt("Nueva fecha importante") { askReminder() },
             Opt("Estilo del menú: ${menuNames[prefs.getInt("menu", 0) % 2]}") { prefs.edit().putInt("menu", prefs.getInt("menu", 0) + 1).apply(); customPanel() },
             Opt("Estilo…") { stylePanel() },
             Opt("Fondos…") { wallPanel() },
