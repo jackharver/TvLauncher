@@ -116,6 +116,7 @@ class MainActivity : Activity() {
     private var heroSyn: TextView? = null
     private var idleBox: View? = null
     private var ringsV: RingsView? = null
+    private var capV: CapsuleView? = null
     private var evCardView: TextView? = null
     private var cardImg: ImageView? = null
     private var cardTitle: TextView? = null
@@ -657,7 +658,7 @@ class MainActivity : Activity() {
             if (!stat.inet && !stat.lan && !stat.wifi) it.set(0f, "OFF", true)
             else if (stat.lan) it.set(1f, "LAN") else it.set(stat.sig, "${(stat.sig * 100).toInt()}%", stat.sig < 0.3f)
         }
-        clusterV?.invalidate(); segV?.invalidate(); sportV?.invalidate(); orbV?.invalidate(); hudV?.invalidate(); miniV?.invalidate(); ringsV?.invalidate()
+        clusterV?.invalidate(); segV?.invalidate(); sportV?.invalidate(); orbV?.invalidate(); hudV?.invalidate(); miniV?.invalidate(); ringsV?.invalidate(); capV?.invalidate()
         indicators.forEach { ind ->
             ind.lit = when (ind.kind) { 0 -> stat.wifi; 1 -> stat.lan; 2 -> btOn(); 3 -> hdmiOn; 4 -> musicOn; 5 -> dnsOn(); else -> stat.inet }
             ind.invalidate()
@@ -1633,7 +1634,7 @@ class MainActivity : Activity() {
         mediaBox = null; heroBox = null; clusterV = null; segV = null; sportV = null; orbV = null; wxIcon = null
         sysInfo = null; wxBig = null; wxDesc2 = null; wxDetail = null; wxTom = null; indicators.clear()
         miniV = null; tickerView = null; heroSyn = null; idleBox = null
-        ringsV = null; evCardView = null; cardImg = null; cardTitle = null; cardSub = null; mediaIdle = null
+        capV = null; ringsV = null; evCardView = null; cardImg = null; cardTitle = null; cardSub = null; mediaIdle = null
         carouselTask?.let { handler.removeCallbacks(it) }; carouselTask = null
     }
  
@@ -2122,20 +2123,23 @@ class MainActivity : Activity() {
         return row
     }
  
-    private fun makeHero(): LinearLayout {
+    private fun makeHero(compact: Boolean = false): LinearLayout {
         val hb = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(28), 0, dp(20), 0); visibility = View.GONE }
         heroBox = hb
         heroProv = TextView(this).apply { textSize = 13f; letterSpacing = 0.22f; setTextColor(skin.accent); setShadowLayer(6f, 0f, 2f, Color.BLACK) }
-        heroTitle = TextView(this).apply { textSize = 32f; typeface = disp(); setTextColor(Color.WHITE); maxLines = 2; setShadowLayer(12f, 0f, 3f, Color.BLACK) }
+        heroTitle = TextView(this).apply {
+            textSize = if (compact) 27f else 32f; typeface = disp(); setTextColor(Color.WHITE); maxLines = 2; setShadowLayer(12f, 0f, 3f, Color.BLACK)
+        }
         heroSyn = TextView(this).apply {
-            textSize = 14f; typeface = body(); setTextColor(0xFFE6E0F0.toInt()); maxLines = 3
-            ellipsize = android.text.TextUtils.TruncateAt.END; setShadowLayer(6f, 0f, 2f, Color.BLACK); setPadding(0, dp(6), 0, 0)
+            textSize = 14f; typeface = body(); setTextColor(0xFFE6E0F0.toInt()); maxLines = if (compact) 2 else 3
+            ellipsize = android.text.TextUtils.TruncateAt.END; setShadowLayer(6f, 0f, 2f, Color.BLACK); setPadding(0, dp(4), 0, 0)
         }
         val btn = chip("Ver") { captionAction() }
         heroBtn = btn as TextView
-        hb.addView(heroProv); hb.addView(heroTitle, LinearLayout.LayoutParams(dp(460), WRAP))
-        hb.addView(heroSyn, LinearLayout.LayoutParams(dp(460), WRAP))
-        hb.addView(btn, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(10) })
+        val w = if (compact) dp(560) else dp(460)
+        hb.addView(heroProv); hb.addView(heroTitle, LinearLayout.LayoutParams(w, WRAP))
+        hb.addView(heroSyn, LinearLayout.LayoutParams(w, WRAP))
+        hb.addView(btn, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(8) })
         return hb
     }
  
@@ -2214,6 +2218,85 @@ class MainActivity : Activity() {
         }
     }
  
+    // cápsula de estado: icono, valor, palabra clara (Normal / Alta / Crítica) y barra con semáforo de color
+    private inner class CapsuleView(ctx: Context) : View(ctx) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val tp = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val rect = RectF()
+        private val cur = FloatArray(3)
+        override fun onMeasure(w: Int, h: Int) { setMeasuredDimension(dp(390), dp(52)) }
+ 
+        private fun level(v: Float, warn: Float, crit: Float): Int = if (v >= crit) 2 else if (v >= warn) 1 else 0
+        private fun colorOf(l: Int): Int = when (l) { 2 -> 0xFFFF5A4D.toInt(); 1 -> 0xFFFFB347.toInt(); else -> 0xFF7BE08F.toInt() }
+ 
+        private fun icon(c: Canvas, kind: Int, cx: Float, cy: Float, s: Float, color: Int) {
+            p.style = Paint.Style.STROKE; p.strokeWidth = s * 0.1f; p.strokeCap = Paint.Cap.ROUND; p.strokeJoin = Paint.Join.ROUND; p.color = color
+            when (kind) {
+                0 -> {
+                    rect.set(cx - s * 0.28f, cy - s * 0.28f, cx + s * 0.28f, cy + s * 0.28f); c.drawRoundRect(rect, s * 0.06f, s * 0.06f, p)
+                    for (i in -1..1) {
+                        val o = i * s * 0.18f
+                        c.drawLine(cx + o, cy - s * 0.28f, cx + o, cy - s * 0.42f, p); c.drawLine(cx + o, cy + s * 0.28f, cx + o, cy + s * 0.42f, p)
+                        c.drawLine(cx - s * 0.28f, cy + o, cx - s * 0.42f, cy + o, p); c.drawLine(cx + s * 0.28f, cy + o, cx + s * 0.42f, cy + o, p)
+                    }
+                }
+                1 -> {
+                    rect.set(cx - s * 0.09f, cy - s * 0.42f, cx + s * 0.09f, cy + s * 0.1f); c.drawRoundRect(rect, s * 0.09f, s * 0.09f, p)
+                    p.style = Paint.Style.FILL; c.drawCircle(cx, cy + s * 0.22f, s * 0.16f, p)
+                }
+                2 -> {
+                    rect.set(cx - s * 0.38f, cy - s * 0.3f, cx + s * 0.38f, cy + s * 0.3f); c.drawRoundRect(rect, s * 0.1f, s * 0.1f, p)
+                    c.drawCircle(cx, cy, s * 0.12f, p); c.drawLine(cx + s * 0.2f, cy + s * 0.18f, cx + s * 0.3f, cy + s * 0.18f, p)
+                }
+                else -> {
+                    for (k in 1..3) {
+                        val r = s * 0.17f * k
+                        rect.set(cx - r, cy + s * 0.25f - r, cx + r, cy + s * 0.25f + r); c.drawArc(rect, 225f, 90f, false, p)
+                    }
+                    p.style = Paint.Style.FILL; c.drawCircle(cx, cy + s * 0.25f, s * 0.05f, p)
+                }
+            }
+        }
+ 
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            val hasT = stat.temp >= 0f
+            val tgt = floatArrayOf(stat.ram, if (hasT) stat.temp / 100f else (stat.mbps / 100f).coerceIn(0f, 1f), stat.disk)
+            rect.set(0f, 0f, w, h)
+            p.style = Paint.Style.FILL; p.color = 0xF0101018.toInt(); c.drawRoundRect(rect, h / 2, h / 2, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = dp(1).toFloat(); p.color = withAlpha(skin.accent, 0x88); c.drawRoundRect(rect, h / 2, h / 2, p)
+            val sw = w / 3f
+            var moving = false
+            val values = arrayOf("${(stat.ram * 100).toInt()}%", if (hasT) "${stat.temp.toInt()}°" else "${"%.0f".format(stat.mbps)} Mb/s", "${(stat.disk * 100).toInt()}%")
+            val names = arrayOf("Memoria RAM", if (hasT) "Temperatura" else "Descarga", "Almacenamiento")
+            val states = arrayOf(arrayOf("Normal", "Alta", "Crítica"), arrayOf("Normal", "Alta", "Crítica"), arrayOf("Normal", "Alto", "Lleno"))
+            for (i in 0..2) {
+                cur[i] = ease(cur[i], tgt[i]); if (Math.abs(cur[i] - tgt[i]) > 0.004f) moving = true
+                val l = when (i) { 0 -> level(cur[i], 0.7f, 0.88f); 1 -> if (hasT) level(cur[i], 0.55f, 0.72f) else 0; else -> level(cur[i], 0.8f, 0.92f) }
+                val color = colorOf(l)
+                val x0 = sw * i
+                if (i > 0) { p.style = Paint.Style.STROKE; p.strokeWidth = 1f; p.color = 0x22FFFFFF; c.drawLine(x0, h * 0.24f, x0, h * 0.76f, p) }
+                icon(c, if (i == 0) 0 else if (i == 1) (if (hasT) 1 else 3) else 2, x0 + h * 0.52f, h * 0.44f, h * 0.46f, color)
+                val tx = x0 + h * 0.86f
+                tp.style = Paint.Style.FILL; tp.textAlign = Paint.Align.LEFT
+                tp.typeface = Typeface.DEFAULT_BOLD; tp.textSize = h * 0.33f; tp.color = Color.WHITE
+                c.drawText(values[i], tx, h * 0.46f, tp)
+                val vw = tp.measureText(values[i])
+                if (i != 1 || hasT) {
+                    tp.typeface = body(); tp.textSize = h * 0.2f; tp.color = color
+                    c.drawText(states[i][l], tx + vw + dp(6), h * 0.46f, tp)
+                }
+                tp.typeface = body(); tp.textSize = h * 0.2f; tp.color = 0xFFB0A9BC.toInt()
+                c.drawText(names[i], tx, h * 0.68f, tp)
+                val bx0 = tx; val bx1 = x0 + sw - h * 0.3f; val by = h * 0.86f
+                p.style = Paint.Style.STROKE; p.strokeCap = Paint.Cap.ROUND; p.strokeWidth = dp(3).toFloat()
+                p.color = 0x33FFFFFF; c.drawLine(bx0, by, bx1, by, p)
+                p.color = color; c.drawLine(bx0, by, bx0 + (bx1 - bx0) * cur[i].coerceIn(0.02f, 1f), by, p)
+            }
+            if (moving) postInvalidateOnAnimation()
+        }
+    }
+ 
     // diseño Aurora Dock: reloj grande, dock inferior con medidores en el borde
     private fun buildDock() {
         val hidden = getSet("hidden"); val favs = getSet("fav")
@@ -2221,6 +2304,8 @@ class MainActivity : Activity() {
         val dockApps = visible.filter { it.activityInfo.packageName in favs }.take(7)
         resetRefs()
         val root = baseRoot(intArrayOf(0x44000000, 0x00000000, 0xCC000000.toInt()))
+        val bsel = prefs.getInt("bar", 0) % 3
+        val barH = dp(82) + (if (bsel == 1) dp(44) else if (bsel == 2) -dp(26) else 0)
         val railOn = prefs.getInt("btnpos", 0) % 2 == 1
         val content = FrameLayout(this).apply { setPadding(if (railOn) dp(54) else 0, 0, 0, 0) }
         content.addView(topBar(false), FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
@@ -2228,19 +2313,21 @@ class MainActivity : Activity() {
         val tl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         tl.addView(TextView(this).apply { text = greetingText(); textSize = 16f; typeface = body(); setTextColor(skin.accent); setShadowLayer(4f, 0f, 1f, Color.BLACK) })
         tl.addView(TextClock(this).apply {
-            format24Hour = "HH:mm"; format12Hour = "h:mm"; textSize = 58f; typeface = disp(); setTextColor(Color.WHITE); setShadowLayer(12f, 0f, 3f, Color.BLACK)
+            format24Hour = "HH:mm"; format12Hour = "h:mm"; textSize = 52f; typeface = disp(); setTextColor(Color.WHITE); setShadowLayer(12f, 0f, 3f, Color.BLACK)
         })
         tl.addView(TextClock(this).apply {
             format24Hour = "EEEE d 'de' MMMM"; format12Hour = "EEEE d 'de' MMMM"; textSize = 16f; typeface = body(); setTextColor(0xFFE6E0F0.toInt())
         })
-        content.addView(tl, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START).apply { setMargins(dp(32), dp(88), 0, 0) })
-        content.addView(makeHero(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = dp(132) })
+        content.addView(tl, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START).apply { setMargins(dp(32), barH + dp(6), 0, 0) })
+        content.addView(makeHero(true), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START).apply { topMargin = barH + dp(112) })
         val st = widgetStack(1)
-        if (st.childCount > 0) content.addView(st, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, dp(92), dp(28), 0) })
+        if (st.childCount > 0) content.addView(st, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END).apply { setMargins(0, barH + dp(10), dp(28), 0) })
  
         val dials = flag("wg_gauges")
+        val capsule = prefs.getInt("dockg", 0) % 2 == 0
+        val gh = if (capsule) dp(52) else dp(64)
         val dock = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), if (dials) dp(36) else dp(10), dp(12), dp(8))
+            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), if (dials) gh / 2 + dp(8) else dp(10), dp(12), dp(8))
             background = GradientDrawable().apply { cornerRadius = dp(34).toFloat(); setColor(0xC8101018.toInt()); setStroke(dp(1), withAlpha(skin.accent, 0x66)) }
         }
         var first: View? = null
@@ -2256,8 +2343,9 @@ class MainActivity : Activity() {
         if (first == null) first = allBtn
         dock.addView(allBtn, LinearLayout.LayoutParams(dp(88), dp(90)))
         val dockWrap = FrameLayout(this)
-        dockWrap.addView(dock, FrameLayout.LayoutParams(WRAP, WRAP).apply { topMargin = if (dials) dp(32) else 0 })
-        if (dials) { val m = MiniDials(this); miniV = m; dockWrap.addView(m, FrameLayout.LayoutParams(dp(196), dp(64), Gravity.TOP or Gravity.CENTER_HORIZONTAL)) }
+        dockWrap.addView(dock, FrameLayout.LayoutParams(WRAP, WRAP).apply { topMargin = if (dials) gh / 2 else 0 })
+        if (dials && capsule) { val m = CapsuleView(this); capV = m; dockWrap.addView(m, FrameLayout.LayoutParams(dp(390), dp(52), Gravity.TOP or Gravity.CENTER_HORIZONTAL)) }
+        else if (dials) { val m = MiniDials(this); miniV = m; dockWrap.addView(m, FrameLayout.LayoutParams(dp(196), dp(64), Gravity.TOP or Gravity.CENTER_HORIZONTAL)) }
         content.addView(dockWrap, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(12) })
         root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
         if (railOn) root.addView(sideRail(), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply { leftMargin = dp(8) })
@@ -2299,6 +2387,7 @@ class MainActivity : Activity() {
         ) },
         GTab("WIDGETS") { listOf(
             gChoice("Medidores", "gstyle", gNames),
+            gChoice("Medidores del dock", "dockg", arrayOf("Cápsula", "Esferas")),
             gChoice("Reproductor de música", "mstyle", mstyleNames),
             gSwitch("Mostrar medidores", "wg_gauges"),
             gSwitch("Estado de entradas", "wg_status"),
@@ -3350,6 +3439,7 @@ class MainActivity : Activity() {
             Opt("Clima en la barra: ${wxsNames[prefs.getInt("wxs", 0) % 4]}") { prefs.edit().putInt("wxs", prefs.getInt("wxs", 0) + 1).apply(); build(); barPanel() },
             Opt("Medidores: ${gNames[prefs.getInt("gstyle", 0) % 5]}") { prefs.edit().putInt("gstyle", prefs.getInt("gstyle", 0) + 1).apply(); build(); barPanel() },
             Opt("Reproductor de música: ${mstyleNames[prefs.getInt("mstyle", 0) % 5]}") { prefs.edit().putInt("mstyle", prefs.getInt("mstyle", 0) + 1).apply(); build(); barPanel() },
+            Opt("Medidores del dock: ${if (prefs.getInt("dockg", 0) % 2 == 0) "Cápsula" else "Esferas"}") { prefs.edit().putInt("dockg", prefs.getInt("dockg", 0) + 1).apply(); build(); barPanel() },
             Opt("Widgets…") { widgetsPanel() },
             Opt("Volver") { stylePanel() }
         ))
